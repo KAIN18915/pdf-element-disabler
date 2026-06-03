@@ -1,6 +1,7 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.mjs";
 
 const EXPORT_RENDER_SCALE = 2;
+const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227";
 const PDF_LIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
 
 let pdfLibPromise = null;
@@ -12,8 +13,7 @@ function loadPdfLib() {
   return pdfLibPromise;
 }
 
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.worker.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_DIST_URL}/build/pdf.worker.mjs`;
 
 // PDF.js は図形を Path2D として組み立て、`ctx.fill(path2d)` で描画する。
 // その Path2D のバウンディングボックスを記録できるよう、Path2D を差し替える。
@@ -147,10 +147,7 @@ async function loadPdf(source, name) {
   setStatus(`${name} を読み込んでいます...`);
 
   try {
-    const loadingTask =
-      typeof source === "string"
-        ? pdfjsLib.getDocument({ url: source })
-        : pdfjsLib.getDocument({ data: source });
+    const loadingTask = pdfjsLib.getDocument(buildPdfDocumentOptions(source));
     const pdfDoc = await loadingTask.promise;
     if (token !== state.renderToken) {
       return;
@@ -166,6 +163,17 @@ async function loadPdf(source, name) {
     setStatus("PDFを読み込めませんでした。ファイル形式または配置を確認してください。", "error");
     updateControls();
   }
+}
+
+function buildPdfDocumentOptions(source) {
+  const sourceOption = typeof source === "string" ? { url: source } : { data: source };
+
+  return {
+    ...sourceOption,
+    cMapUrl: `${PDFJS_DIST_URL}/cmaps/`,
+    cMapPacked: true,
+    standardFontDataUrl: `${PDFJS_DIST_URL}/standard_fonts/`,
+  };
 }
 
 async function renderDocument() {
