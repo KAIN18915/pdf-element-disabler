@@ -1,4 +1,7 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.mjs";
+import { PDFDocument } from "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm";
+
+const EXPORT_RENDER_SCALE = 2;
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.worker.mjs";
@@ -35,7 +38,7 @@ const els = {
   thresholdInput: document.querySelector("#white-threshold"),
   thresholdValue: document.querySelector("#white-threshold-value"),
   scaleSelect: document.querySelector("#scale-select"),
-  printButton: document.querySelector("#print-button"),
+  downloadButton: document.querySelector("#download-button"),
   resetButton: document.querySelector("#reset-button"),
   coverCount: document.querySelector("#cover-count"),
   revealedCount: document.querySelector("#revealed-count"),
@@ -105,10 +108,7 @@ els.resetButton.addEventListener("click", () => {
   }
 });
 
-els.printButton.addEventListener("click", () => window.print());
-
-window.addEventListener("beforeprint", applyPrintLayout);
-window.addEventListener("afterprint", clearPrintLayout);
+els.downloadButton.addEventListener("click", () => downloadModifiedPdf());
 
 els.colorInput.value = state.textColor;
 els.thresholdInput.value = String(state.whiteThreshold);
@@ -203,14 +203,12 @@ async function buildPageShell(pageNumber, token) {
   }
 
   const viewport = page.getViewport({ scale: state.scale });
-
-  const printViewport = page.getViewport({ scale: 1 });
-  const widthPt = Math.round(printViewport.width * 10) / 10;
-  const heightPt = Math.round(printViewport.height * 10) / 10;
+  const baseViewport = page.getViewport({ scale: 1 });
+  const widthPt = Math.round(baseViewport.width * 10) / 10;
+  const heightPt = Math.round(baseViewport.height * 10) / 10;
 
   const shell = document.createElement("article");
   shell.className = "page-shell";
-  shell.dataset.page = String(pageNumber);
 
   const label = document.createElement("div");
   label.className = "page-label";
@@ -220,24 +218,43 @@ async function buildPageShell(pageNumber, token) {
   pageNode.className = "page";
   pageNode.style.width = `${viewport.width}px`;
   pageNode.style.height = `${viewport.height}px`;
-  pageNode.style.setProperty("--print-width", `${widthPt}pt`);
-  pageNode.style.setProperty("--print-height", `${heightPt}pt`);
 
-  const canvas = document.createElement("canvas");
   const coverLayer = document.createElement("div");
   coverLayer.className = "cover-layer";
 
+  const outputScale = window.devicePixelRatio || 1;
+  const { canvas, covers } = await paintPdfPage(page, pageNumber, state.scale, outputScale);
+  if (token !== state.renderToken) {
+    return null;
+  }
+
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
   pageNode.append(canvas, coverLayer);
   shell.append(label, pageNode);
 
-  const outputScale = window.devicePixelRatio || 1;
+  paintCoverHits(coverLayer, covers, pageNumber);
+
+  const pageView = {
+    pageNumber,
+    shell,
+    coverCount: covers.length,
+    widthPt,
+    heightPt,
+  };
+  state.pageViews.set(pageNumber, pageView);
+  recountCovers();
+
+  return shell;
+}
+
+async function paintPdfPage(page, pageNumber, renderScale, outputScale) {
+  const viewport = page.getViewport({ scale: renderScale });
+  const canvas = document.createElement("canvas");
   canvas.width = Math.floor(viewport.width * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
 
   const context = canvas.getContext("2d", { alpha: false });
-  // 被せ物を消したときに下が黒くならないよう、背景を白で塗っておく。
   context.save();
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -258,24 +275,97 @@ async function buildPageShell(pageNumber, token) {
   }).promise;
 
   instrument.restore();
+  return { canvas, covers };
+}
 
-  if (token !== state.renderToken) {
-    return null;
+async function downloadModifiedPdf() {
+  const { pdfDoc, pdfName } = state;
+  if (!pdfDoc || state.pageViews.size === 0) {
+    return;
   }
 
-  paintCoverHits(coverLayer, covers, pageNumber);
+  const token = state.renderToken;
+  els.downloadButton.disabled = true;
+  setStatus("PDFを作成しています...");
 
-  const pageView = {
-    pageNumber,
-    shell,
-    coverCount: covers.length,
-    widthPt,
-    heightPt,
-  };
-  state.pageViews.set(pageNumber, pageView);
-  recountCovers();
+  try {
+    const outDoc = await PDFDocument.create();
+    const pageCount = pdfDoc.numPages;
 
-  return shell;
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      if (token !== state.renderToken) {
+        return;
+      }
+
+      const page = await pdfDoc.getPage(pageNumber);
+      const view = state.pageViews.get(pageNumber);
+      const widthPt = view?.widthPt ?? page.getViewport({ scale: 1 }).width;
+      const heightPt = view?.heightPt ?? page.getViewport({ scale: 1 }).height;
+
+      const { canvas } = await paintPdfPage(
+        page,
+        pageNumber,
+        EXPORT_RENDER_SCALE,
+        EXPORT_RENDER_SCALE,
+      );
+
+      const pngBytes = await canvasToPngBytes(canvas);
+      const image = await outDoc.embedPng(pngBytes);
+      const pdfPage = outDoc.addPage([widthPt, heightPt]);
+      pdfPage.drawImage(image, {
+        x: 0,
+        y: 0,
+        width: widthPt,
+        height: heightPt,
+      });
+    }
+
+    if (token !== state.renderToken) {
+      return;
+    }
+
+    const bytes = await outDoc.save();
+    triggerDownload(bytes, buildDownloadName(pdfName));
+    setStatus(`${pdfName} の編集済みPDFをダウンロードしました。`);
+  } catch (error) {
+    console.error(error);
+    setStatus("PDFの作成に失敗しました。ページ数が多い場合は時間をおいて再試行してください。", "error");
+  } finally {
+    if (token === state.renderToken) {
+      updateControls();
+    }
+  }
+}
+
+function canvasToPngBytes(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      async (blob) => {
+        if (!blob) {
+          reject(new Error("canvas export failed"));
+          return;
+        }
+        resolve(new Uint8Array(await blob.arrayBuffer()));
+      },
+      "image/png",
+    );
+  });
+}
+
+function buildDownloadName(name) {
+  const base = name.replace(/\.pdf$/i, "") || "document";
+  return `${base}_編集済み.pdf`;
+}
+
+function triggerDownload(bytes, filename) {
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 // PDF.js は要素をすべて 2D canvas に描画する。fillStyle が白に近い塗りつぶし
@@ -521,7 +611,7 @@ function recountCovers() {
 
 function updateControls() {
   const hasPdf = Boolean(state.pdfDoc);
-  els.printButton.disabled = !hasPdf;
+  els.downloadButton.disabled = !hasPdf;
   els.resetButton.disabled = !hasPdf;
   els.coverCount.textContent = String(state.totalCovers);
 
@@ -534,40 +624,6 @@ function updateControls() {
 function setStatus(message, type = "") {
   els.status.textContent = message;
   els.status.className = `status ${message ? "visible" : ""} ${type}`.trim();
-}
-
-let printStyleEl = null;
-
-function applyPrintLayout() {
-  if (!state.pdfDoc || state.pageViews.size === 0) {
-    return;
-  }
-
-  const rules = ["@page { margin: 0; }"];
-  const sorted = [...state.pageViews.values()].sort((a, b) => a.pageNumber - b.pageNumber);
-
-  for (const view of sorted) {
-    const pageName = `pdf-page-${view.pageNumber}`;
-    rules.push(
-      `@page ${pageName} { size: ${view.widthPt}pt ${view.heightPt}pt; margin: 0; }`,
-      `.page-shell[data-page="${view.pageNumber}"] { page: ${pageName}; }`,
-    );
-  }
-
-  if (!printStyleEl) {
-    printStyleEl = document.createElement("style");
-    printStyleEl.id = "print-page-rules";
-    document.head.append(printStyleEl);
-  }
-  printStyleEl.textContent = rules.join("\n");
-  document.body.classList.add("is-printing");
-}
-
-function clearPrintLayout() {
-  document.body.classList.remove("is-printing");
-  if (printStyleEl) {
-    printStyleEl.textContent = "";
-  }
 }
 
 function newBBox() {
