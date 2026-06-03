@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pdf-overlay-reveal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f7f6f2;
+      --surface: #fbfbf9;
+      --surface-2: #f1efe9;
+      --border: #d7d3ca;
+      --text: #24211c;
+      --muted: #69655f;
+      --primary: #01696f;
+      --primary-2: #0c4e54;
+      --danger: #b43452;
+      --ok: #3b7a32;
+      --shadow: 0 12px 28px rgba(20,18,12,0.08);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; font-family: Inter, system-ui, sans-serif; color: var(--text); background: var(--bg); }
+    body { min-height: 100vh; }
+    .app {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      min-height: 100vh;
+    }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 24px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+    }
+    .viewer-wrap { min-width: 0; }
+    .viewer-top {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      background: color-mix(in srgb, var(--bg) 88%, white 12%);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .toolbar-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    h1 {
+      font-size: 28px;
+      line-height: 1.1;
+      margin: 0 0 12px;
+      letter-spacing: -0.02em;
+    }
+    h2 { font-size: 18px; margin: 0 0 10px; }
+    p { line-height: 1.65; color: var(--muted); margin: 0 0 12px; }
+    .card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+    .btn, .file-label {
+      appearance: none;
+      border: 1px solid transparent;
+      background: var(--primary);
+      color: white;
+      padding: 11px 14px;
+      border-radius: 999px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 180ms ease;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+    .btn:hover, .file-label:hover { background: var(--primary-2); }
+    .btn.secondary {
+      background: white;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn.secondary:hover { background: #f4f2ed; }
+    .btn.danger { background: var(--danger); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    .small { font-size: 13px; color: var(--muted); }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .stat {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    .stat .label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .stat .value { font-size: 20px; font-weight: 700; }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid rgba(0,0,0,0.15);
+    }
+    .dot.white { background: white; }
+    .dot.hidden { background: #f3b7c5; }
+    .dot.kept { background: #b9dfb1; }
+    .page-list { display: flex; flex-direction: column; gap: 10px; max-height: 38vh; overflow: auto; padding-right: 4px; }
+    .page-item {
+      border: 1px solid var(--border);
+      background: white;
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+    }
+    .page-item:hover { background: #f8f7f3; }
+    .page-item.active { outline: 2px solid color-mix(in srgb, var(--primary) 40%, white); }
+    .viewer {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      align-items: center;
+    }
+    .page-shell {
+      position: relative;
+      background: #d8d3c7;
+      padding: 18px;
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      width: fit-content;
+      max-width: calc(100% - 8px);
+    }
+    .page-stage {
+      position: relative;
+      background: white;
+      overflow: hidden;
+      transform-origin: top center;
+    }
+    canvas.page-canvas { display: block; background: white; }
+    .anno-layer {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .anno-rect {
+      position: absolute;
+      pointer-events: auto;
+      border: 2px solid rgba(1, 105, 111, 0.8);
+      background: rgba(1, 105, 111, 0.10);
+      cursor: pointer;
+      transition: 120ms ease;
+    }
+    .anno-rect:hover { background: rgba(1, 105, 111, 0.22); }
+    .anno-rect.hidden {
+      border-color: rgba(180, 52, 82, 0.85);
+      background: rgba(180, 52, 82, 0.18);
+    }
+    .anno-rect.hidden::after {
+      content: '非表示';
+      position: absolute;
+      right: 6px;
+      top: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #7b1230;
+      background: rgba(255,255,255,0.9);
+      padding: 2px 5px;
+      border-radius: 999px;
+    }
+    .manual-eraser {
+      position: absolute;
+      border: 2px dashed rgba(180, 52, 82, 0.95);
+      background: rgba(180, 52, 82, 0.12);
+      pointer-events: none;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      background: white;
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .status { font-size: 14px; color: var(--muted); min-height: 1.5em; }
+    .empty {
+      border: 2px dashed var(--border);
+      border-radius: 22px;
+      padding: 56px 24px;
+      text-align: center;
+      max-width: 860px;
+      width: calc(100% - 48px);
+      background: rgba(255,255,255,0.55);
+    }
+    .empty strong { display: block; font-size: 22px; margin-bottom: 8px; color: var(--text); }
+    .notice {
+      font-size: 13px;
+      color: #6a5030;
+      background: #fff8e8;
+      border: 1px solid #ecd9a7;
+      border-radius: 14px;
+      padding: 12px 14px;
+      line-height: 1.55;
+    }
+    .ok {
+      color: var(--ok);
+      font-weight: 600;
+    }
+    .range-wrap { display: flex; gap: 10px; align-items: center; }
+    .range-wrap input[type="range"] { width: 180px; }
+    .checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+      .viewer-top { padding: 14px 16px; }
+      .viewer { padding: 16px; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1>PDF Overlay Reveal</h1>
+      <p>白い長方形の注釈やオーバーレイをクリックして隠し、見た目を反映した新しいPDFを書き出すための試作版です。</p>
+
+      <div class="card">
+        <h2>読み込み</h2>
+        <label class="file-label" for="pdfFile">PDFを選ぶ</label>
+        <input id="pdfFile" type="file" accept="application/pdf" />
+        <p class="small" id="fileName">未選択</p>
+        <div class="stats">
+          <div class="stat"><span class="label">ページ数</span><span class="value" id="pageCount">-</span></div>
+          <div class="stat"><span class="label">候補</span><span class="value" id="candidateCount">-</span></div>
+          <div class="stat"><span class="label">非表示</span><span class="value" id="hiddenCount">0</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>操作</h2>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+          <button class="btn secondary" id="toggleManual">手動矩形モード</button>
+          <button class="btn secondary" id="resetHidden">すべて戻す</button>
+          <button class="btn danger" id="exportPdf" disabled>新しいPDFを書き出す</button>
+        </div>
+        <div class="range-wrap" style="margin-bottom:10px;">
+          <label class="small" for="zoom">表示倍率</label>
+          <input id="zoom" type="range" min="60" max="180" value="100" />
+          <span class="small" id="zoomLabel">100%</span>
+        </div>
+        <label class="checkbox-row" style="margin-bottom:10px;">
+          <input id="filterWhiteOnly" type="checkbox" checked />
+          <span>白っぽい長方形候補だけ強調表示する。外すと、検出した注釈候補を広めに表示します。</span>
+        </label>
+        <div class="legend-row"><span class="dot white"></span><span>検出候補</span></div>
+        <div class="legend-row"><span class="dot hidden"></span><span>クリックして非表示にした候補</span></div>
+        <div class="legend-row"><span class="dot kept"></span><span>エクスポート時は見えている候補だけ残ります</span></div>
+        <p class="small" style="margin-top:12px;">手動矩形モードではドラッグで隠したい白箱の上に範囲を指定し、その範囲を出力時に消せます。</p>
+      </div>
+
+      <div class="card">
+        <h2>ページ</h2>
+        <div class="page-list" id="pageList"></div>
+      </div>
+
+      <div class="notice">
+        これは「見た目上の白い被せ」を外す用途向けです。元データが本当に削除された redaction や、白箱がページ画像に焼き込まれているPDFでは元の内容は復元できません。その場合はこのツールでも見えるようにできません。
+      </div>
+    </aside>
+
+    <main class="viewer-wrap">
+      <div class="viewer-top">
+        <div class="toolbar-group">
+          <span class="badge" id="modeBadge">通常モード</span>
+          <span class="status" id="status">PDFを読み込むと、白い長方形候補を自動検出します。</span>
+        </div>
+      </div>
+      <div class="viewer" id="viewer">
+        <div class="empty">
+          <strong>PDFを読み込んでください</strong>
+          <p>授業資料などの上に被さっている白い長方形注釈をクリックすると、その候補だけ隠せます。最後に新しいPDFを書き出すと、現在の見た目を1ページずつ画像化したPDFとして保存します。</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+  <script type="module">
+    import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+    import { jsPDF } from 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/+esm';
+    import html2canvas from 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/+esm';
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+    const state = {
+      pdfBytes: null,
+      pdfDoc: null,
+      fileName: '',
+      pages: [],
+      hiddenRects: new Set(),
+      manualRects: [],
+      scale: 1,
+      manualMode: false,
+      whiteOnly: true,
+    };
+
+    const els = {
+      pdfFile: document.getElementById('pdfFile'),
+      fileName: document.getElementById('fileName'),
+      pageCount: document.getElementById('pageCount'),
+      candidateCount: document.getElementById('candidateCount'),
+      hiddenCount: document.getElementById('hiddenCount'),
+      pageList: document.getElementById('pageList'),
+      viewer: document.getElementById('viewer'),
+      status: document.getElementById('status'),
+      exportPdf: document.getElementById('exportPdf'),
+      resetHidden: document.getElementById('resetHidden'),
+      zoom: document.getElementById('zoom'),
+      zoomLabel: document.getElementById('zoomLabel'),
+      toggleManual: document.getElementById('toggleManual'),
+      modeBadge: document.getElementById('modeBadge'),
+      filterWhiteOnly: document.getElementById('filterWhiteOnly'),
+    };
+
+    const setStatus = (msg) => { els.status.textContent = msg; };
+
+    const updateCounts = () => {
+      const candidates = state.pages.reduce((n, p) => n + p.candidates.filter(c => !c.filteredOut).length, 0);
+      els.pageCount.textContent = state.pages.length || '-';
+      els.candidateCount.textContent = state.pages.length ? String(candidates) : '-';
+      els.hiddenCount.textContent = String(state.hiddenRects.size + state.manualRects.length);
+      els.exportPdf.disabled = !state.pages.length;
+    };
+
+    const getRectId = (pageNumber, idx) => `p${pageNumber}-a${idx}`;
+
+    const isLikelyWhiteStyle = (style = {}) => {
+      const parts = [style.color || '', style.fillColor || '', style.strokeColor || '', style.borderColor || '', style.backgroundColor || '']
+        .map(v => String(v).toLowerCase())
+        .join(' ');
+      const whiteHints = ['#fff', '#ffffff', 'rgb(255', 'gray(1', '1 g', '1 rg', 'white'];
+      return whiteHints.some(h => parts.includes(h));
+    };
+
+    const annotationLooksRectangular = (a) => {
+      const rect = a.rect || [];
+      const w = Math.abs((rect[2] || 0) - (rect[0] || 0));
+      const h = Math.abs((rect[3] || 0) - (rect[1] || 0));
+      return w > 10 && h > 10;
+    };
+
+    const classifyCandidate = (a) => {
+      const subtype = a.subtype || '';
+      const hasRect = annotationLooksRectangular(a);
+      const whiteish = isLikelyWhiteStyle(a);
+      const shapeLike = ['Square', 'FreeText', 'Ink', 'Highlight', 'Widget'].includes(subtype);
+      return {
+        whiteish,
+        keep: hasRect && (whiteish || shapeLike),
+      };
+    };
+
+    async function loadPdf(file) {
+      state.fileName = file.name;
+      state.pdfBytes = new Uint8Array(await file.arrayBuffer());
+      state.hiddenRects.clear();
+      state.manualRects = [];
+      state.pages = [];
+      els.fileName.textContent = file.name;
+      els.viewer.innerHTML = '';
+      els.pageList.innerHTML = '';
+      setStatus('PDFを解析しています…');
+
+      const loadingTask = pdfjsLib.getDocument({ data: state.pdfBytes });
+      state.pdfDoc = await loadingTask.promise;
+      const total = state.pdfDoc.numPages;
+
+      for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
+        const page = await state.pdfDoc.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.5 * state.scale });
+        const annotations = await page.getAnnotations({ intent: 'display' });
+        const candidates = annotations.map((a, idx) => {
+          const info = classifyCandidate(a);
+          return {
+            ...a,
+            id: getRectId(pageNumber, idx),
+            pageNumber,
+            idx,
+            filteredOut: !(info.keep && (!state.whiteOnly || info.whiteish)),
+            whiteish: info.whiteish,
+          };
+        });
+
+        const pageEntry = { pageNumber, page, viewport, annotations, candidates, shell: null, stage: null, annoLayer: null, canvas: null };
+        state.pages.push(pageEntry);
+        await renderPage(pageEntry);
+        addPageListItem(pageEntry);
+      }
+
+      updateCounts();
+      setStatus('候補をクリックすると、その白い被せを非表示にできます。');
+    }
+
+    function addPageListItem(pageEntry) {
+      const item = document.createElement('button');
+      item.className = 'page-item';
+      const count = pageEntry.candidates.filter(c => !c.filteredOut).length;
+      item.innerHTML = `<span>ページ ${pageEntry.pageNumber}</span><span>${count} 個</span>`;
+      item.addEventListener('click', () => {
+        pageEntry.shell?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        document.querySelectorAll('.page-item').forEach(el => el.classList.remove('active'));
+        item.classList.add('active');
+      });
+      els.pageList.appendChild(item);
+    }
+
+    async function renderPage(pageEntry) {
+      const shell = document.createElement('section');
+      shell.className = 'page-shell';
+      shell.dataset.pageNumber = String(pageEntry.pageNumber);
+
+      const stage = document.createElement('div');
+      stage.className = 'page-stage';
+      stage.style.width = `${pageEntry.viewport.width}px`;
+      stage.style.height = `${pageEntry.viewport.height}px`;
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'page-canvas';
+      canvas.width = Math.floor(pageEntry.viewport.width);
+      canvas.height = Math.floor(pageEntry.viewport.height);
+      canvas.style.width = `${pageEntry.viewport.width}px`;
+      canvas.style.height = `${pageEntry.viewport.height}px`;
+      const ctx = canvas.getContext('2d', { alpha: false });
+      await pageEntry.page.render({ canvasContext: ctx, viewport: pageEntry.viewport }).promise;
+
+      const annoLayer = document.createElement('div');
+      annoLayer.className = 'anno-layer';
+      renderCandidates(pageEntry, annoLayer);
+      enableManualRects(pageEntry, stage);
+
+      stage.appendChild(canvas);
+      stage.appendChild(annoLayer);
+      shell.appendChild(stage);
+      els.viewer.appendChild(shell);
+
+      pageEntry.shell = shell;
+      pageEntry.stage = stage;
+      pageEntry.annoLayer = annoLayer;
+      pageEntry.canvas = canvas;
+    }
+
+    function renderCandidates(pageEntry, annoLayer) {
+      annoLayer.innerHTML = '';
+      const [x0, y0] = [0, 0];
+      for (const c of pageEntry.candidates) {
+        if (c.filteredOut) continue;
+        const rect = pdfRectToCss(c.rect, pageEntry.viewport);
+        if (!rect) continue;
+        const div = document.createElement('div');
+        div.className = 'anno-rect';
+        if (state.hiddenRects.has(c.id)) div.classList.add('hidden');
+        div.style.left = `${rect.left}px`;
+        div.style.top = `${rect.top}px`;
+        div.style.width = `${rect.width}px`;
+        div.style.height = `${rect.height}px`;
+        div.title = `ページ ${c.pageNumber} の候補。クリックで表示/非表示を切り替え。`;
+        div.dataset.id = c.id;
+        div.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleHidden(c.id, div);
+        });
+        annoLayer.appendChild(div);
+      }
+
+      for (const mr of state.manualRects.filter(r => r.pageNumber === pageEntry.pageNumber)) {
+        const div = document.createElement('div');
+        div.className = 'anno-rect hidden';
+        div.style.left = `${mr.left}px`;
+        div.style.top = `${mr.top}px`;
+        div.style.width = `${mr.width}px`;
+        div.style.height = `${mr.height}px`;
+        div.title = '手動矩形。ダブルクリックで削除。';
+        div.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          state.manualRects = state.manualRects.filter(x => x.id !== mr.id);
+          refreshAllCandidateLayers();
+          updateCounts();
+        });
+        annoLayer.appendChild(div);
+      }
+    }
+
+    function refreshAllCandidateLayers() {
+      for (const pageEntry of state.pages) {
+        if (pageEntry.annoLayer) renderCandidates(pageEntry, pageEntry.annoLayer);
+      }
+      updateCounts();
+    }
+
+    function toggleHidden(id, div) {
+      if (state.hiddenRects.has(id)) {
+        state.hiddenRects.delete(id);
+        div.classList.remove('hidden');
+      } else {
+        state.hiddenRects.add(id);
+        div.classList.add('hidden');
+      }
+      updateCounts();
+    }
+
+    function pdfRectToCss(rect, viewport) {
+      if (!rect || rect.length < 4) return null;
+      const [x1, y1, x2, y2] = rect;
+      const left = Math.min(x1, x2) * viewport.scale;
+      const width = Math.abs(x2 - x1) * viewport.scale;
+      const height = Math.abs(y2 - y1) * viewport.scale;
+      const top = viewport.height - Math.max(y1, y2) * viewport.scale;
+      if (width < 4 || height < 4) return null;
+      return { left, top, width, height };
+    }
+
+    function enableManualRects(pageEntry, stage) {
+      let start = null;
+      let preview = null;
+
+      const getPos = (ev) => {
+        const r = stage.getBoundingClientRect();
+        return {
+          x: Math.max(0, Math.min(r.width, ev.clientX - r.left)),
+          y: Math.max(0, Math.min(r.height, ev.clientY - r.top)),
+        };
+      };
+
+      stage.addEventListener('pointerdown', (ev) => {
+        if (!state.manualMode) return;
+        if (ev.target.closest('.anno-rect')) return;
+        start = getPos(ev);
+        preview = document.createElement('div');
+        preview.className = 'manual-eraser';
+        stage.appendChild(preview);
+      });
+
+      stage.addEventListener('pointermove', (ev) => {
+        if (!state.manualMode || !start || !preview) return;
+        const p = getPos(ev);
+        const left = Math.min(start.x, p.x);
+        const top = Math.min(start.y, p.y);
+        const width = Math.abs(p.x - start.x);
+        const height = Math.abs(p.y - start.y);
+        Object.assign(preview.style, {
+          left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`
+        });
+      });
+
+      const finish = (ev) => {
+        if (!state.manualMode || !start || !preview) return;
+        const p = getPos(ev);
+        const left = Math.min(start.x, p.x);
+        const top = Math.min(start.y, p.y);
+        const width = Math.abs(p.x - start.x);
+        const height = Math.abs(p.y - start.y);
+        preview.remove();
+        preview = null;
+        start = null;
+        if (width < 8 || height < 8) return;
+        state.manualRects.push({
+          id: crypto.randomUUID(),
+          pageNumber: pageEntry.pageNumber,
+          left, top, width, height,
+        });
+        renderCandidates(pageEntry, pageEntry.annoLayer);
+        updateCounts();
+      };
+
+      stage.addEventListener('pointerup', finish);
+      stage.addEventListener('pointerleave', () => { if (preview && !start) preview.remove(); });
+    }
+
+    async function rebuildAtScale(newScale) {
+      if (!state.pdfDoc) return;
+      state.scale = newScale;
+      const prevHidden = new Set(state.hiddenRects);
+      const prevManual = [...state.manualRects];
+      const file = new File([state.pdfBytes], state.fileName || 'document.pdf', { type: 'application/pdf' });
+      await loadPdf(file);
+      state.hiddenRects = prevHidden;
+      state.manualRects = prevManual.map(r => ({ ...r, left: r.left * (newScale / 1), top: r.top * (newScale / 1), width: r.width * (newScale / 1), height: r.height * (newScale / 1) }));
+      refreshAllCandidateLayers();
+    }
+
+    function toggleManualMode() {
+      state.manualMode = !state.manualMode;
+      els.modeBadge.textContent = state.manualMode ? '手動矩形モード' : '通常モード';
+      els.toggleManual.textContent = state.manualMode ? '通常モードへ戻る' : '手動矩形モード';
+      setStatus(state.manualMode ? 'ドラッグで白箱の範囲を指定してください。ダブルクリックで手動矩形を削除できます。' : '候補をクリックすると、その白い被せを非表示にできます。');
+    }
+
+    async function exportCurrentView() {
+      if (!state.pages.length) return;
+      setStatus('PDFを書き出しています…');
+      const pdf = new jsPDF({ unit: 'pt', compress: true });
+      let first = true;
+
+      for (const pageEntry of state.pages) {
+        const clone = pageEntry.stage.cloneNode(true);
+        clone.style.transform = 'none';
+        clone.querySelectorAll('.anno-rect').forEach((el) => {
+          if (!el.classList.contains('hidden')) {
+            el.style.border = 'none';
+            el.style.background = 'transparent';
+          } else {
+            el.style.border = 'none';
+            el.style.background = 'transparent';
+            el.style.display = 'none';
+          }
+        });
+        clone.querySelectorAll('.manual-eraser').forEach(el => el.remove());
+        clone.style.position = 'fixed';
+        clone.style.left = '-100000px';
+        clone.style.top = '0';
+        clone.style.zIndex = '-1';
+        document.body.appendChild(clone);
+
+        const canvas = await html2canvas(clone, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false });
+        document.body.removeChild(clone);
+
+        const img = canvas.toDataURL('image/jpeg', 0.96);
+        const width = canvas.width;
+        const height = canvas.height;
+        const pdfW = width * 0.75;
+        const pdfH = height * 0.75;
+
+        if (first) {
+          pdf.internal.pageSize.setWidth(pdfW);
+          pdf.internal.pageSize.setHeight(pdfH);
+          first = false;
+        } else {
+          pdf.addPage([pdfW, pdfH], pdfW > pdfH ? 'landscape' : 'portrait');
+        }
+        pdf.addImage(img, 'JPEG', 0, 0, pdfW, pdfH, undefined, 'FAST');
+      }
+
+      const safe = (state.fileName || 'document.pdf').replace(/\.pdf$/i, '');
+      pdf.save(`${safe}-revealed.pdf`);
+      setStatus('書き出しが完了しました。');
+    }
+
+    els.pdfFile.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        state.scale = Number(els.zoom.value) / 100;
+        await loadPdf(file);
+      } catch (err) {
+        console.error(err);
+        setStatus('PDFの読み込みに失敗しました。パスワード付きや壊れたPDFの可能性があります。');
+      }
+    });
+
+    els.resetHidden.addEventListener('click', () => {
+      state.hiddenRects.clear();
+      state.manualRects = [];
+      refreshAllCandidateLayers();
+      setStatus('非表示状態をすべて戻しました。');
+    });
+
+    els.exportPdf.addEventListener('click', exportCurrentView);
+    els.toggleManual.addEventListener('click', toggleManualMode);
+
+    els.zoom.addEventListener('input', () => {
+      els.zoomLabel.textContent = `${els.zoom.value}%`;
+    });
+
+    let zoomTimer = null;
+    els.zoom.addEventListener('change', async () => {
+      if (!state.pdfDoc) return;
+      clearTimeout(zoomTimer);
+      zoomTimer = setTimeout(async () => {
+        const newScale = Number(els.zoom.value) / 100;
+        try {
+          setStatus('倍率を更新しています…');
+          await rebuildAtScale(newScale);
+        } catch (err) {
+          console.error(err);
+          setStatus('倍率更新に失敗しました。');
+        }
+      }, 50);
+    });
+
+    els.filterWhiteOnly.addEventListener('change', async () => {
+      state.whiteOnly = els.filterWhiteOnly.checked;
+      if (!state.pdfDoc) return;
+      try {
+        setStatus('候補を再解析しています…');
+        const file = new File([state.pdfBytes], state.fileName || 'document.pdf', { type: 'application/pdf' });
+        await loadPdf(file);
+      } catch (err) {
+        console.error(err);
+        setStatus('再解析に失敗しました。');
+      }
+    });
+  </script>
+</body>
+</html>
