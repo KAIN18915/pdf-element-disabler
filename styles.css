@@ -343,7 +343,12 @@ select {
 }
 
 @media print {
+  html,
   body {
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0;
     background: #ffffff;
   }
 
@@ -356,23 +361,49 @@ select {
     display: none !important;
   }
 
-  .layout {
+  .layout,
+  .viewer-wrap {
     display: block;
+    margin: 0;
     padding: 0;
   }
 
   .viewer {
+    display: block;
     gap: 0;
+    margin: 0;
+    padding: 0;
   }
 
   .page-shell {
+    display: block;
+    margin: 0;
+    padding: 0;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .page-shell:not(:last-child) {
     break-after: page;
     page-break-after: always;
   }
 
   .page {
+    position: relative;
+    overflow: hidden;
+    width: var(--print-width) !important;
+    height: var(--print-height) !important;
     border-radius: 0;
     box-shadow: none;
-    margin: 0 auto;
+    margin: 0;
+  }
+
+  .page canvas {
+    position: absolute;
+    inset: 0;
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none;
+    max-height: none;
   }
 }
