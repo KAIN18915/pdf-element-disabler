@@ -149,22 +149,45 @@ button:disabled {
   margin: 0.8rem 0 0;
 }
 
-.segmented {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.5rem;
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
 }
 
-.segmented button {
+.switch input {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.color-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: 0.2rem 0 0.4rem;
+  font-weight: 600;
+}
+
+.color-row input[type="color"] {
+  width: 3rem;
+  height: 2.2rem;
+  padding: 0;
   border: 1px solid var(--line);
-  background: #eef2ff;
-  color: var(--accent-dark);
+  border-radius: 0.5rem;
+  background: #ffffff;
+  cursor: pointer;
 }
 
-.segmented button.active {
-  background: var(--accent);
-  color: #ffffff;
-  box-shadow: 0 10px 22px rgb(49 94 251 / 22%);
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .select-label {
@@ -252,8 +275,7 @@ select {
 }
 
 .page canvas,
-.mask-layer,
-.text-layer {
+.cover-layer {
   position: absolute;
   inset: 0;
 }
@@ -264,17 +286,12 @@ select {
   height: 100%;
 }
 
-.mask-layer {
+.cover-layer {
   z-index: 1;
   pointer-events: none;
 }
 
-.text-layer {
-  z-index: 2;
-  pointer-events: none;
-}
-
-.text-hit {
+.cover-hit {
   position: absolute;
   min-height: 0;
   padding: 0;
@@ -283,43 +300,27 @@ select {
   background: transparent;
   color: transparent;
   pointer-events: auto;
+  transition: background 120ms ease, border-color 120ms ease;
 }
 
-.text-hit:hover,
-.text-hit:focus-visible {
-  background: rgb(49 94 251 / 10%);
-  border-color: rgb(49 94 251 / 62%);
+.cover-hit:hover,
+.cover-hit:focus-visible {
+  background: rgb(49 94 251 / 14%);
+  border-color: rgb(49 94 251 / 70%);
   box-shadow: none;
   outline: none;
   transform: none;
 }
 
-.text-hit.hidden {
-  pointer-events: none;
+/* 個別に「消した」被せ物は、点線でクリックして戻せることを示す。 */
+.cover-hit.revealed {
+  border: 1px dashed rgb(193 53 21 / 55%);
 }
 
-.area-mode .text-hit {
-  pointer-events: none;
-}
-
-.area-mode .page {
-  cursor: crosshair;
-}
-
-.hide-mask {
-  position: absolute;
-  background: #ffffff;
-  border: 1px solid rgb(49 94 251 / 28%);
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 84%) inset;
-}
-
-.hide-mask.area {
-  border-color: rgb(193 53 21 / 30%);
-}
-
-.hide-mask.draft {
-  background: rgb(49 94 251 / 12%);
-  border: 1px dashed var(--accent);
+.cover-hit.revealed:hover,
+.cover-hit.revealed:focus-visible {
+  background: rgb(193 53 21 / 12%);
+  border-color: rgb(193 53 21 / 80%);
 }
 
 @media (max-width: 860px) {
@@ -350,7 +351,8 @@ select {
   .toolbar,
   .empty-state,
   .status,
-  .page-label {
+  .page-label,
+  .cover-layer {
     display: none !important;
   }
 
