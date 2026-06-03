@@ -3,16 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PDF Element Disabler</title>
+    <title>穴埋め解除ビューア</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="app-header">
       <div>
         <p class="eyebrow">GitHub Pages ready</p>
-        <h1>PDF Element Disabler</h1>
+        <h1>穴埋め解除ビューア</h1>
         <p class="lead">
-          PDFをブラウザ内で開き、クリックしたテキスト要素やドラッグした範囲を一時的に非表示にします。
+          先生が答えの上に乗せた「白い長方形」を消したり、「白文字（見えない文字）」に色を付けて、
+          隠された答えをブラウザ内で表示するツールです。
         </p>
       </div>
       <div class="header-actions">
@@ -25,15 +26,34 @@
     </header>
 
     <main class="layout">
-      <aside class="toolbar" aria-label="PDF操作">
+      <aside class="toolbar" aria-label="操作">
         <section class="panel">
-          <h2>非表示ツール</h2>
-          <div class="segmented" role="group" aria-label="非表示モード">
-            <button id="text-tool" class="active" type="button" aria-pressed="true">テキストクリック</button>
-            <button id="area-tool" type="button" aria-pressed="false">範囲ドラッグ</button>
-          </div>
+          <h2>穴埋め解除</h2>
+          <label class="switch">
+            <input id="reveal-overlays" type="checkbox" />
+            <span>白い被せ物をすべて消す</span>
+          </label>
+          <label class="switch">
+            <input id="recolor-text" type="checkbox" />
+            <span>白文字に色を付ける</span>
+          </label>
+          <label class="color-row" for="text-color">
+            <span>表示する色</span>
+            <input id="text-color" type="color" value="#dd1133" />
+          </label>
           <p id="tool-help" class="hint">
-            テキスト上にカーソルを重ね、薄い枠が出た要素をクリックすると隠せます。
+            白い長方形の上にカーソルを重ね、枠が出た所をクリックすると、その被せ物だけを消せます。もう一度クリックで戻せます。
+          </p>
+        </section>
+
+        <section class="panel">
+          <h2>感度</h2>
+          <label class="select-label" for="white-threshold">
+            白とみなす明るさ: <span id="white-threshold-value">238</span>
+          </label>
+          <input id="white-threshold" type="range" min="200" max="255" step="1" />
+          <p class="hint">
+            被せ物や白文字が消えない / 色が付かないときは、値を下げて薄いグレーも対象にしてください。
           </p>
         </section>
 
@@ -52,15 +72,18 @@
 
         <section class="panel">
           <h2>編集</h2>
-          <button id="undo-button" type="button" disabled>1つ戻す</button>
-          <button id="reset-button" type="button" disabled>すべて表示に戻す</button>
-          <p class="counter"><span id="hidden-count">0</span> 個の要素を非表示</p>
+          <button id="reset-button" type="button" disabled>元の状態に戻す</button>
+          <p class="counter">
+            検出した被せ物 <span id="cover-count">0</span> 個 /
+            表示中 <span id="revealed-count">0</span> 個
+          </p>
         </section>
 
         <section class="panel note">
           <h2>メモ</h2>
           <p>
-            非表示は画面表示と印刷用の白いマスクです。機密情報の完全な削除には、専用の墨消しツールを使ってください。
+            処理はブラウザ内だけで行われ、PDFはどこにも送信されません。被せ物の検出は白い塗りつぶしと白い文字が対象です。
+            画像で隠されている場合や、複雑なPDFでは検出できないことがあります。
           </p>
         </section>
       </aside>
