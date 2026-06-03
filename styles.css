@@ -216,6 +216,7 @@ select {
 
 .viewer-wrap {
   min-width: 0;
+  width: 100%;
 }
 
 .empty-state,
@@ -274,7 +275,7 @@ select {
   background: #ffffff;
   border-radius: 0.4rem;
   box-shadow: var(--shadow);
-  touch-action: none;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .page canvas,
@@ -303,6 +304,7 @@ select {
   background: transparent;
   color: transparent;
   pointer-events: auto;
+  touch-action: pan-x pan-y pinch-zoom;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
@@ -336,11 +338,22 @@ select {
     display: grid;
   }
 
+  .layout {
+    gap: 1rem;
+    padding: 1rem 0 2rem;
+  }
+
   .header-actions {
     justify-content: flex-start;
   }
 
   .toolbar {
     position: static;
+    padding-inline: 1rem;
+  }
+
+  .status,
+  .empty-state {
+    margin-inline: 1rem;
   }
 }
