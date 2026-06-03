@@ -1,7 +1,16 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.mjs";
-import { PDFDocument } from "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm";
 
 const EXPORT_RENDER_SCALE = 2;
+const PDF_LIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
+
+let pdfLibPromise = null;
+
+function loadPdfLib() {
+  if (!pdfLibPromise) {
+    pdfLibPromise = import(PDF_LIB_URL);
+  }
+  return pdfLibPromise;
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.worker.mjs";
@@ -289,6 +298,7 @@ async function downloadModifiedPdf() {
   setStatus("PDFを作成しています...");
 
   try {
+    const { PDFDocument } = await loadPdfLib();
     const outDoc = await PDFDocument.create();
     const pageCount = pdfDoc.numPages;
 
@@ -329,7 +339,10 @@ async function downloadModifiedPdf() {
     setStatus(`${pdfName} の編集済みPDFをダウンロードしました。`);
   } catch (error) {
     console.error(error);
-    setStatus("PDFの作成に失敗しました。ページ数が多い場合は時間をおいて再試行してください。", "error");
+    setStatus(
+      "PDFの作成に失敗しました。ネットワーク接続を確認するか、時間をおいて再試行してください。",
+      "error",
+    );
   } finally {
     if (token === state.renderToken) {
       updateControls();
