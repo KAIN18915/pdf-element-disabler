@@ -1,0 +1,376 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --text: #152033;
+  --muted: #5c6b82;
+  --line: #d9e0ec;
+  --accent: #315efb;
+  --accent-dark: #2447bd;
+  --danger: #c13515;
+  --shadow: 0 18px 45px rgb(30 41 59 / 12%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+button,
+.file-button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.75rem;
+  padding: 0 1.1rem;
+  font-weight: 700;
+  transition:
+    background 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+button:hover,
+.file-button:hover {
+  background: var(--accent-dark);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  background: #b8c1d3;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  padding: 2.25rem clamp(1rem, 4vw, 3rem);
+  background:
+    radial-gradient(circle at top left, rgb(49 94 251 / 16%), transparent 34rem),
+    var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3.3rem);
+  letter-spacing: -0.05em;
+}
+
+.eyebrow {
+  margin: 0 0 0.45rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.lead {
+  max-width: 44rem;
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  min-width: min(100%, 22rem);
+}
+
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(17rem, 21rem) 1fr;
+  gap: 1.25rem;
+  padding: 1.25rem clamp(1rem, 3vw, 2rem) 2rem;
+}
+
+.toolbar {
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+  display: grid;
+  gap: 1rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  padding: 1rem;
+  box-shadow: 0 8px 24px rgb(30 41 59 / 7%);
+}
+
+.panel h2 {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+}
+
+.hint,
+.note p,
+.counter {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0.8rem 0 0;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
+}
+
+.segmented button {
+  border: 1px solid var(--line);
+  background: #eef2ff;
+  color: var(--accent-dark);
+}
+
+.segmented button.active {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 10px 22px rgb(49 94 251 / 22%);
+}
+
+.select-label {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+select {
+  width: 100%;
+  min-height: 2.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: #ffffff;
+  color: var(--text);
+  padding: 0 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.panel > button {
+  width: 100%;
+  margin-top: 0.65rem;
+}
+
+.viewer-wrap {
+  min-width: 0;
+}
+
+.empty-state,
+.status {
+  background: var(--panel);
+  border: 1px dashed #b8c1d3;
+  border-radius: 1.25rem;
+  color: var(--muted);
+  padding: 2rem;
+  text-align: center;
+}
+
+.empty-state h2 {
+  color: var(--text);
+  margin-top: 0;
+}
+
+.status {
+  display: none;
+  margin-bottom: 1rem;
+}
+
+.status.visible {
+  display: block;
+}
+
+.status.error {
+  border-color: rgb(193 53 21 / 35%);
+  color: var(--danger);
+}
+
+.viewer {
+  display: grid;
+  gap: 1.5rem;
+  justify-items: center;
+}
+
+.page-shell {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.page-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.page {
+  position: relative;
+  overflow: hidden;
+  background: #ffffff;
+  border-radius: 0.4rem;
+  box-shadow: var(--shadow);
+  touch-action: none;
+}
+
+.page canvas,
+.mask-layer,
+.text-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.page canvas {
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mask-layer {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.text-layer {
+  z-index: 2;
+  pointer-events: none;
+}
+
+.text-hit {
+  position: absolute;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0.15rem;
+  background: transparent;
+  color: transparent;
+  pointer-events: auto;
+}
+
+.text-hit:hover,
+.text-hit:focus-visible {
+  background: rgb(49 94 251 / 10%);
+  border-color: rgb(49 94 251 / 62%);
+  box-shadow: none;
+  outline: none;
+  transform: none;
+}
+
+.text-hit.hidden {
+  pointer-events: none;
+}
+
+.area-mode .text-hit {
+  pointer-events: none;
+}
+
+.area-mode .page {
+  cursor: crosshair;
+}
+
+.hide-mask {
+  position: absolute;
+  background: #ffffff;
+  border: 1px solid rgb(49 94 251 / 28%);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 84%) inset;
+}
+
+.hide-mask.area {
+  border-color: rgb(193 53 21 / 30%);
+}
+
+.hide-mask.draft {
+  background: rgb(49 94 251 / 12%);
+  border: 1px dashed var(--accent);
+}
+
+@media (max-width: 860px) {
+  .app-header,
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .app-header {
+    display: grid;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
+  }
+
+  .toolbar {
+    position: static;
+  }
+}
+
+@media print {
+  body {
+    background: #ffffff;
+  }
+
+  .app-header,
+  .toolbar,
+  .empty-state,
+  .status,
+  .page-label {
+    display: none !important;
+  }
+
+  .layout {
+    display: block;
+    padding: 0;
+  }
+
+  .viewer {
+    gap: 0;
+  }
+
+  .page-shell {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .page {
+    border-radius: 0;
+    box-shadow: none;
+    margin: 0 auto;
+  }
+}
