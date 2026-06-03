@@ -3,29 +3,42 @@ import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.worker.mjs";
 
+// PDF.js は図形を Path2D として組み立て、`ctx.fill(path2d)` で描画する。
+// その Path2D のバウンディングボックスを記録できるよう、Path2D を差し替える。
+installTrackedPath2D();
+
 const state = {
   pdfDoc: null,
   pdfName: "",
   scale: 1,
-  tool: "text",
-  masks: [],
-  history: [],
-  pageViews: new Map(),
-  nextMaskId: 1,
   renderToken: 0,
+  // 穴埋め解除の設定
+  revealAllOverlays: false,
+  recolorText: false,
+  textColor: "#dd1133",
+  // 「白」とみなす最小の明るさ (0-255)。値が小さいほど薄いグレーも対象になる。
+  whiteThreshold: 238,
+  // 個別に表示した被せ物のキー (`page:index`)
+  revealedCovers: new Set(),
+  // ページごとの描画情報
+  pageViews: new Map(),
+  // 統計
+  totalCovers: 0,
 };
 
 const els = {
   fileInput: document.querySelector("#file-input"),
   sampleButton: document.querySelector("#sample-button"),
-  textTool: document.querySelector("#text-tool"),
-  areaTool: document.querySelector("#area-tool"),
-  toolHelp: document.querySelector("#tool-help"),
+  revealOverlaysToggle: document.querySelector("#reveal-overlays"),
+  recolorToggle: document.querySelector("#recolor-text"),
+  colorInput: document.querySelector("#text-color"),
+  thresholdInput: document.querySelector("#white-threshold"),
+  thresholdValue: document.querySelector("#white-threshold-value"),
   scaleSelect: document.querySelector("#scale-select"),
   printButton: document.querySelector("#print-button"),
-  undoButton: document.querySelector("#undo-button"),
   resetButton: document.querySelector("#reset-button"),
-  hiddenCount: document.querySelector("#hidden-count"),
+  coverCount: document.querySelector("#cover-count"),
+  revealedCount: document.querySelector("#revealed-count"),
   emptyState: document.querySelector("#empty-state"),
   status: document.querySelector("#status"),
   viewer: document.querySelector("#viewer"),
@@ -36,33 +49,76 @@ els.fileInput.addEventListener("change", async (event) => {
   if (!file) {
     return;
   }
-
   await loadPdf(await file.arrayBuffer(), file.name);
 });
 
 els.sampleButton.addEventListener("click", () => loadPdf("./main.pdf", "main.pdf"));
+
 els.scaleSelect.addEventListener("change", () => {
   state.scale = Number(els.scaleSelect.value);
   if (state.pdfDoc) {
     renderDocument();
   }
 });
-els.textTool.addEventListener("click", () => setTool("text"));
-els.areaTool.addEventListener("click", () => setTool("area"));
-els.undoButton.addEventListener("click", undoLastMask);
-els.resetButton.addEventListener("click", resetMasks);
+
+els.revealOverlaysToggle.addEventListener("change", () => {
+  state.revealAllOverlays = els.revealOverlaysToggle.checked;
+  if (state.pdfDoc) {
+    renderDocument();
+  }
+});
+
+els.recolorToggle.addEventListener("change", () => {
+  state.recolorText = els.recolorToggle.checked;
+  if (state.pdfDoc) {
+    renderDocument();
+  }
+});
+
+els.colorInput.addEventListener("change", () => {
+  state.textColor = els.colorInput.value;
+  if (state.pdfDoc && state.recolorText) {
+    renderDocument();
+  }
+});
+
+els.thresholdInput.addEventListener("input", () => {
+  state.whiteThreshold = Number(els.thresholdInput.value);
+  els.thresholdValue.textContent = String(state.whiteThreshold);
+});
+els.thresholdInput.addEventListener("change", () => {
+  if (state.pdfDoc) {
+    renderDocument();
+  }
+});
+
+els.resetButton.addEventListener("click", () => {
+  state.revealedCovers.clear();
+  state.revealAllOverlays = false;
+  state.recolorText = false;
+  els.revealOverlaysToggle.checked = false;
+  els.recolorToggle.checked = false;
+  if (state.pdfDoc) {
+    renderDocument();
+  } else {
+    updateControls();
+  }
+});
+
 els.printButton.addEventListener("click", () => window.print());
 
-setTool("text");
+els.colorInput.value = state.textColor;
+els.thresholdInput.value = String(state.whiteThreshold);
+els.thresholdValue.textContent = String(state.whiteThreshold);
 updateControls();
 
 async function loadPdf(source, name) {
   const token = ++state.renderToken;
   state.pdfDoc = null;
   state.pdfName = name;
-  state.masks = [];
-  state.history = [];
+  state.revealedCovers.clear();
   state.pageViews.clear();
+  state.totalCovers = 0;
   els.viewer.replaceChildren();
   els.emptyState.hidden = true;
   updateControls();
@@ -98,30 +154,53 @@ async function renderDocument() {
   }
 
   state.pageViews.clear();
+  state.totalCovers = 0;
   els.viewer.replaceChildren();
   els.emptyState.hidden = true;
-  setStatus(`${state.pdfName} を描画しています...`);
+  setStatus(`${state.pdfName} を解析しています...`);
 
   for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
     if (token !== state.renderToken) {
       return;
     }
-    await renderPage(pageNumber, token);
+    const shell = await buildPageShell(pageNumber, token);
+    if (token !== state.renderToken || !shell) {
+      return;
+    }
+    els.viewer.append(shell);
   }
 
   if (token === state.renderToken) {
-    setStatus(`${state.pdfName} を表示中: ${pdfDoc.numPages}ページ`);
+    setStatus(
+      `${state.pdfName}: ${pdfDoc.numPages}ページ / 白い被せ物 ${state.totalCovers} 個を検出`,
+    );
     updateControls();
   }
 }
 
-async function renderPage(pageNumber, token) {
+async function rerenderPage(pageNumber) {
+  const pageView = state.pageViews.get(pageNumber);
+  if (!pageView) {
+    return;
+  }
+  const token = state.renderToken;
+  const newShell = await buildPageShell(pageNumber, token);
+  if (token !== state.renderToken || !newShell) {
+    return;
+  }
+  pageView.shell.replaceWith(newShell);
+  recountCovers();
+  updateControls();
+}
+
+async function buildPageShell(pageNumber, token) {
   const page = await state.pdfDoc.getPage(pageNumber);
   if (token !== state.renderToken) {
-    return;
+    return null;
   }
 
   const viewport = page.getViewport({ scale: state.scale });
+
   const shell = document.createElement("article");
   shell.className = "page-shell";
 
@@ -135,14 +214,11 @@ async function renderPage(pageNumber, token) {
   pageNode.style.height = `${viewport.height}px`;
 
   const canvas = document.createElement("canvas");
-  const maskLayer = document.createElement("div");
-  maskLayer.className = "mask-layer";
-  const textLayer = document.createElement("div");
-  textLayer.className = "text-layer";
+  const coverLayer = document.createElement("div");
+  coverLayer.className = "cover-layer";
 
-  pageNode.append(canvas, maskLayer, textLayer);
+  pageNode.append(canvas, coverLayer);
   shell.append(label, pageNode);
-  els.viewer.append(shell);
 
   const outputScale = window.devicePixelRatio || 1;
   canvas.width = Math.floor(viewport.width * outputScale);
@@ -151,283 +227,292 @@ async function renderPage(pageNumber, token) {
   canvas.style.height = `${viewport.height}px`;
 
   const context = canvas.getContext("2d", { alpha: false });
+  // 被せ物を消したときに下が黒くならないよう、背景を白で塗っておく。
+  context.save();
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.restore();
+
+  const covers = [];
+  const instrument = instrumentContext(context, {
+    canvas,
+    outputScale,
+    pageNumber,
+    covers,
+  });
+
   await page.render({
     canvasContext: context,
     viewport,
     transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
   }).promise;
 
-  const pageView = {
-    pageNumber,
-    width: viewport.width,
-    height: viewport.height,
-    node: pageNode,
-    maskLayer,
-    textLayer,
-  };
-  state.pageViews.set(pageNumber, pageView);
+  instrument.restore();
 
-  attachAreaEvents(pageView);
-  await renderTextHitTargets(page, viewport, pageView);
-  renderStoredMasks(pageView);
+  if (token !== state.renderToken) {
+    return null;
+  }
+
+  paintCoverHits(coverLayer, covers, pageNumber);
+
+  const pageView = { pageNumber, shell, coverCount: covers.length };
+  state.pageViews.set(pageNumber, pageView);
+  recountCovers();
+
+  return shell;
 }
 
-async function renderTextHitTargets(page, viewport, pageView) {
-  const textContent = await page.getTextContent();
+// PDF.js は要素をすべて 2D canvas に描画する。fillStyle が白に近い塗りつぶし
+// (＝答えを隠す被せ物) や、白に近い文字をここで横取りして「消す / 色を変える」。
+function instrumentContext(ctx, info) {
+  const orig = {
+    beginPath: ctx.beginPath.bind(ctx),
+    moveTo: ctx.moveTo.bind(ctx),
+    lineTo: ctx.lineTo.bind(ctx),
+    rect: ctx.rect.bind(ctx),
+    bezierCurveTo: ctx.bezierCurveTo.bind(ctx),
+    quadraticCurveTo: ctx.quadraticCurveTo.bind(ctx),
+    arc: ctx.arc.bind(ctx),
+    arcTo: ctx.arcTo.bind(ctx),
+    ellipse: ctx.ellipse.bind(ctx),
+    closePath: ctx.closePath.bind(ctx),
+    fill: ctx.fill.bind(ctx),
+    fillRect: ctx.fillRect.bind(ctx),
+    fillText: ctx.fillText.bind(ctx),
+    strokeText: ctx.strokeText.bind(ctx),
+  };
+
+  let bbox = newBBox();
+  let coverIndex = 0;
+  const canvasArea = info.canvas.width * info.canvas.height;
+
+  const include = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return;
+    }
+    if (x < bbox.minX) bbox.minX = x;
+    if (y < bbox.minY) bbox.minY = y;
+    if (x > bbox.maxX) bbox.maxX = x;
+    if (y > bbox.maxY) bbox.maxY = y;
+  };
+
+  ctx.beginPath = () => {
+    bbox = newBBox();
+    return orig.beginPath();
+  };
+  ctx.closePath = () => orig.closePath();
+  ctx.moveTo = (x, y) => {
+    include(x, y);
+    return orig.moveTo(x, y);
+  };
+  ctx.lineTo = (x, y) => {
+    include(x, y);
+    return orig.lineTo(x, y);
+  };
+  ctx.rect = (x, y, w, h) => {
+    include(x, y);
+    include(x + w, y + h);
+    return orig.rect(x, y, w, h);
+  };
+  ctx.bezierCurveTo = (cp1x, cp1y, cp2x, cp2y, x, y) => {
+    include(cp1x, cp1y);
+    include(cp2x, cp2y);
+    include(x, y);
+    return orig.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y);
+  };
+  ctx.quadraticCurveTo = (cpx, cpy, x, y) => {
+    include(cpx, cpy);
+    include(x, y);
+    return orig.quadraticCurveTo(cpx, cpy, x, y);
+  };
+  ctx.arc = (x, y, r, ...rest) => {
+    include(x - r, y - r);
+    include(x + r, y + r);
+    return orig.arc(x, y, r, ...rest);
+  };
+  ctx.arcTo = (x1, y1, x2, y2, r) => {
+    include(x1, y1);
+    include(x2, y2);
+    return orig.arcTo(x1, y1, x2, y2, r);
+  };
+  ctx.ellipse = (x, y, rx, ry, ...rest) => {
+    include(x - rx, y - ry);
+    include(x + rx, y + ry);
+    return orig.ellipse(x, y, rx, ry, ...rest);
+  };
+
+  // 被せ物候補かどうか判定し、必要なら描画をスキップする共通処理。
+  const handleCover = (userBox, drawOriginal) => {
+    const color = parseColor(ctx.fillStyle);
+    if (!color || !isNearWhite(color, state.whiteThreshold)) {
+      drawOriginal();
+      return;
+    }
+
+    const device = transformBox(userBox, ctx.getTransform());
+    if (!device) {
+      drawOriginal();
+      return;
+    }
+
+    const deviceArea = device.w * device.h;
+    // ページ全体を覆う白塗り (背景) はそのまま描く。
+    if (canvasArea > 0 && deviceArea / canvasArea >= 0.9) {
+      drawOriginal();
+      return;
+    }
+
+    const cssW = device.w / info.outputScale;
+    const cssH = device.h / info.outputScale;
+    if (cssW < 3 || cssH < 3) {
+      // 細すぎる線などは対象外。
+      drawOriginal();
+      return;
+    }
+
+    const id = coverIndex++;
+    const key = `${info.pageNumber}:${id}`;
+    const revealed = state.revealAllOverlays || state.revealedCovers.has(key);
+
+    info.covers.push({
+      key,
+      revealed,
+      x: device.x / info.outputScale,
+      y: device.y / info.outputScale,
+      w: cssW,
+      h: cssH,
+    });
+
+    if (!revealed) {
+      drawOriginal();
+    }
+  };
+
+  ctx.fill = (...args) => {
+    // PDF.js は `ctx.fill(path2d)` の形で図形を描く。Path2D 側に記録した
+    // バウンディングボックスがあればそれを使い、無ければ ctx のパスを使う。
+    const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
+    const source = pathArg ? pathArg.__bbox : bbox;
+    if (!Number.isFinite(source.minX)) {
+      return orig.fill(...args);
+    }
+    const userBox = { ...source };
+    handleCover(userBox, () => orig.fill(...args));
+  };
+
+  ctx.fillRect = (x, y, w, h) => {
+    const userBox = {
+      minX: Math.min(x, x + w),
+      minY: Math.min(y, y + h),
+      maxX: Math.max(x, x + w),
+      maxY: Math.max(y, y + h),
+    };
+    handleCover(userBox, () => orig.fillRect(x, y, w, h));
+  };
+
+  ctx.fillText = (...args) => {
+    if (state.recolorText) {
+      const color = parseColor(ctx.fillStyle);
+      if (color && isNearWhite(color, state.whiteThreshold)) {
+        const prev = ctx.fillStyle;
+        ctx.fillStyle = state.textColor;
+        const result = orig.fillText(...args);
+        ctx.fillStyle = prev;
+        return result;
+      }
+    }
+    return orig.fillText(...args);
+  };
+
+  ctx.strokeText = (...args) => {
+    if (state.recolorText) {
+      const color = parseColor(ctx.strokeStyle);
+      if (color && isNearWhite(color, state.whiteThreshold)) {
+        const prev = ctx.strokeStyle;
+        ctx.strokeStyle = state.textColor;
+        const result = orig.strokeText(...args);
+        ctx.strokeStyle = prev;
+        return result;
+      }
+    }
+    return orig.strokeText(...args);
+  };
+
+  return {
+    restore() {
+      Object.assign(ctx, {
+        beginPath: orig.beginPath,
+        moveTo: orig.moveTo,
+        lineTo: orig.lineTo,
+        rect: orig.rect,
+        bezierCurveTo: orig.bezierCurveTo,
+        quadraticCurveTo: orig.quadraticCurveTo,
+        arc: orig.arc,
+        arcTo: orig.arcTo,
+        ellipse: orig.ellipse,
+        closePath: orig.closePath,
+        fill: orig.fill,
+        fillRect: orig.fillRect,
+        fillText: orig.fillText,
+        strokeText: orig.strokeText,
+      });
+    },
+  };
+}
+
+function paintCoverHits(layer, covers, pageNumber) {
   const fragment = document.createDocumentFragment();
 
-  textContent.items.forEach((item, itemIndex) => {
-    if (!item.str || !item.str.trim()) {
-      return;
-    }
-
-    const rect = getTextRect(item, viewport);
-    if (!rect || rect.width < 4 || rect.height < 4) {
-      return;
-    }
-
+  covers.forEach((cover) => {
     const hit = document.createElement("button");
     hit.type = "button";
-    hit.className = "text-hit";
-    hit.dataset.page = String(pageView.pageNumber);
-    hit.dataset.itemIndex = String(itemIndex);
-    hit.style.left = `${rect.x}px`;
-    hit.style.top = `${rect.y}px`;
-    hit.style.width = `${rect.width}px`;
-    hit.style.height = `${rect.height}px`;
-    hit.title = `非表示: ${item.str.trim()}`;
-    hit.setAttribute("aria-label", `テキストを非表示: ${item.str.trim()}`);
-
-    if (isTextHidden(pageView.pageNumber, itemIndex)) {
-      hit.classList.add("hidden");
-      hit.disabled = true;
-    }
+    hit.className = `cover-hit${cover.revealed ? " revealed" : ""}`;
+    hit.style.left = `${cover.x}px`;
+    hit.style.top = `${cover.y}px`;
+    hit.style.width = `${cover.w}px`;
+    hit.style.height = `${cover.h}px`;
+    hit.title = cover.revealed
+      ? "クリックで再び隠す"
+      : "クリックでこの被せ物を消して答えを表示";
+    hit.setAttribute(
+      "aria-label",
+      cover.revealed ? "被せ物を再表示" : "被せ物を消して答えを表示",
+    );
 
     hit.addEventListener("click", (event) => {
       event.preventDefault();
-      if (state.tool !== "text" || isTextHidden(pageView.pageNumber, itemIndex)) {
-        return;
+      if (state.revealedCovers.has(cover.key)) {
+        state.revealedCovers.delete(cover.key);
+      } else {
+        state.revealedCovers.add(cover.key);
       }
-
-      addMask(pageView, rect, "text", {
-        itemIndex,
-        label: item.str.trim(),
-      });
-      hit.classList.add("hidden");
-      hit.disabled = true;
+      rerenderPage(pageNumber);
     });
 
     fragment.append(hit);
   });
 
-  pageView.textLayer.replaceChildren(fragment);
+  layer.replaceChildren(fragment);
 }
 
-function getTextRect(item, viewport) {
-  const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
-  const fontHeight = Math.hypot(transform[2], transform[3]);
-  const width = Math.max(item.width * viewport.scale, Math.hypot(transform[0], transform[1]));
-  const height = Math.max(fontHeight, item.height ? item.height * viewport.scale : fontHeight);
-  const padding = Math.min(3, Math.max(1, height * 0.12));
-
-  return clampRect(
-    {
-      x: transform[4] - padding,
-      y: transform[5] - height - padding,
-      width: width + padding * 2,
-      height: height + padding * 2,
-    },
-    viewport.width,
-    viewport.height,
-  );
-}
-
-function attachAreaEvents(pageView) {
-  let drag = null;
-
-  pageView.node.addEventListener("pointerdown", (event) => {
-    if (state.tool !== "area" || event.button !== 0) {
-      return;
-    }
-
-    event.preventDefault();
-    const start = getLocalPoint(event, pageView);
-    const draft = document.createElement("div");
-    draft.className = "hide-mask draft";
-    pageView.maskLayer.append(draft);
-    pageView.node.setPointerCapture(event.pointerId);
-    drag = { start, current: start, draft };
-    updateDraftMask(drag, pageView);
-  });
-
-  pageView.node.addEventListener("pointermove", (event) => {
-    if (!drag) {
-      return;
-    }
-
-    drag.current = getLocalPoint(event, pageView);
-    updateDraftMask(drag, pageView);
-  });
-
-  pageView.node.addEventListener("pointerup", (event) => {
-    if (!drag) {
-      return;
-    }
-
-    drag.current = getLocalPoint(event, pageView);
-    const rect = getDragRect(drag.start, drag.current, pageView);
-    drag.draft.remove();
-    pageView.node.releasePointerCapture(event.pointerId);
-    drag = null;
-
-    if (rect.width >= 8 && rect.height >= 8) {
-      addMask(pageView, rect, "area", { label: "手動選択範囲" });
-    }
-  });
-
-  pageView.node.addEventListener("pointercancel", () => {
-    if (!drag) {
-      return;
-    }
-
-    drag.draft.remove();
-    drag = null;
-  });
-}
-
-function getLocalPoint(event, pageView) {
-  const bounds = pageView.node.getBoundingClientRect();
-  const x = ((event.clientX - bounds.left) / bounds.width) * pageView.width;
-  const y = ((event.clientY - bounds.top) / bounds.height) * pageView.height;
-  return {
-    x: clamp(x, 0, pageView.width),
-    y: clamp(y, 0, pageView.height),
-  };
-}
-
-function updateDraftMask(drag, pageView) {
-  const rect = getDragRect(drag.start, drag.current, pageView);
-  Object.assign(drag.draft.style, {
-    left: `${rect.x}px`,
-    top: `${rect.y}px`,
-    width: `${rect.width}px`,
-    height: `${rect.height}px`,
-  });
-}
-
-function getDragRect(start, current, pageView) {
-  return clampRect(
-    {
-      x: Math.min(start.x, current.x),
-      y: Math.min(start.y, current.y),
-      width: Math.abs(current.x - start.x),
-      height: Math.abs(current.y - start.y),
-    },
-    pageView.width,
-    pageView.height,
-  );
-}
-
-function addMask(pageView, rect, kind, details = {}) {
-  const record = {
-    id: `mask-${state.nextMaskId}`,
-    pageNumber: pageView.pageNumber,
-    kind,
-    itemIndex: details.itemIndex ?? null,
-    label: details.label ?? "",
-    x: rect.x / pageView.width,
-    y: rect.y / pageView.height,
-    width: rect.width / pageView.width,
-    height: rect.height / pageView.height,
-  };
-
-  state.nextMaskId += 1;
-  state.masks.push(record);
-  state.history.push(record);
-  paintMask(pageView, record);
-  updateControls();
-}
-
-function renderStoredMasks(pageView) {
-  for (const record of state.masks) {
-    if (record.pageNumber === pageView.pageNumber) {
-      paintMask(pageView, record);
-    }
+function recountCovers() {
+  let total = 0;
+  for (const view of state.pageViews.values()) {
+    total += view.coverCount || 0;
   }
-}
-
-function paintMask(pageView, record) {
-  const mask = document.createElement("div");
-  mask.className = `hide-mask ${record.kind}`;
-  mask.dataset.maskId = record.id;
-  mask.title = record.label ? `非表示: ${record.label}` : "非表示範囲";
-  Object.assign(mask.style, {
-    left: `${record.x * pageView.width}px`,
-    top: `${record.y * pageView.height}px`,
-    width: `${record.width * pageView.width}px`,
-    height: `${record.height * pageView.height}px`,
-  });
-  pageView.maskLayer.append(mask);
-}
-
-function undoLastMask() {
-  const record = state.history.pop();
-  if (!record) {
-    return;
-  }
-
-  state.masks = state.masks.filter((mask) => mask.id !== record.id);
-  document.querySelectorAll(`[data-mask-id="${record.id}"]`).forEach((node) => node.remove());
-
-  if (record.kind === "text") {
-    const selector = `.text-hit[data-page="${record.pageNumber}"][data-item-index="${record.itemIndex}"]`;
-    const hit = document.querySelector(selector);
-    if (hit) {
-      hit.classList.remove("hidden");
-      hit.disabled = false;
-    }
-  }
-
-  updateControls();
-}
-
-function resetMasks() {
-  state.masks = [];
-  state.history = [];
-  document.querySelectorAll(".hide-mask").forEach((node) => node.remove());
-  document.querySelectorAll(".text-hit.hidden").forEach((node) => {
-    node.classList.remove("hidden");
-    node.disabled = false;
-  });
-  updateControls();
-}
-
-function isTextHidden(pageNumber, itemIndex) {
-  return state.masks.some(
-    (mask) => mask.kind === "text" && mask.pageNumber === pageNumber && mask.itemIndex === itemIndex,
-  );
-}
-
-function setTool(tool) {
-  state.tool = tool;
-  document.body.classList.toggle("area-mode", tool === "area");
-  els.textTool.classList.toggle("active", tool === "text");
-  els.areaTool.classList.toggle("active", tool === "area");
-  els.textTool.setAttribute("aria-pressed", String(tool === "text"));
-  els.areaTool.setAttribute("aria-pressed", String(tool === "area"));
-  els.toolHelp.textContent =
-    tool === "text"
-      ? "テキスト上にカーソルを重ね、薄い枠が出た要素をクリックすると隠せます。"
-      : "PDF上で隠したい範囲をドラッグしてください。画像や図の一部も隠せます。";
+  state.totalCovers = total;
 }
 
 function updateControls() {
   const hasPdf = Boolean(state.pdfDoc);
-  const hasMasks = state.masks.length > 0;
   els.printButton.disabled = !hasPdf;
-  els.undoButton.disabled = !hasMasks;
-  els.resetButton.disabled = !hasMasks;
-  els.hiddenCount.textContent = String(state.masks.length);
+  els.resetButton.disabled = !hasPdf;
+  els.coverCount.textContent = String(state.totalCovers);
+
+  const revealedVisible = state.revealAllOverlays
+    ? state.totalCovers
+    : state.revealedCovers.size;
+  els.revealedCount.textContent = String(revealedVisible);
 }
 
 function setStatus(message, type = "") {
@@ -435,17 +520,199 @@ function setStatus(message, type = "") {
   els.status.className = `status ${message ? "visible" : ""} ${type}`.trim();
 }
 
-function clampRect(rect, maxWidth, maxHeight) {
-  const x = clamp(rect.x, 0, maxWidth);
-  const y = clamp(rect.y, 0, maxHeight);
+function newBBox() {
   return {
-    x,
-    y,
-    width: clamp(rect.width, 0, maxWidth - x),
-    height: clamp(rect.height, 0, maxHeight - y),
+    minX: Infinity,
+    minY: Infinity,
+    maxX: -Infinity,
+    maxY: -Infinity,
   };
 }
 
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
+function includeInto(bbox, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return;
+  }
+  if (x < bbox.minX) bbox.minX = x;
+  if (y < bbox.minY) bbox.minY = y;
+  if (x > bbox.maxX) bbox.maxX = x;
+  if (y > bbox.maxY) bbox.maxY = y;
+}
+
+function installTrackedPath2D() {
+  const Native = globalThis.Path2D;
+  if (!Native || Native.__tracked) {
+    return;
+  }
+
+  class TrackedPath2D extends Native {
+    constructor(arg) {
+      super(arg);
+      this.__bbox = newBBox();
+      // 既存パスを複製する場合は bbox も引き継ぐ。
+      if (arg && typeof arg === "object" && arg.__bbox) {
+        const b = arg.__bbox;
+        includeInto(this.__bbox, b.minX, b.minY);
+        includeInto(this.__bbox, b.maxX, b.maxY);
+      }
+    }
+
+    moveTo(x, y) {
+      includeInto(this.__bbox, x, y);
+      return super.moveTo(x, y);
+    }
+    lineTo(x, y) {
+      includeInto(this.__bbox, x, y);
+      return super.lineTo(x, y);
+    }
+    rect(x, y, w, h) {
+      includeInto(this.__bbox, x, y);
+      includeInto(this.__bbox, x + w, y + h);
+      return super.rect(x, y, w, h);
+    }
+    roundRect(x, y, w, h, r) {
+      includeInto(this.__bbox, x, y);
+      includeInto(this.__bbox, x + w, y + h);
+      return super.roundRect(x, y, w, h, r);
+    }
+    bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y) {
+      includeInto(this.__bbox, cp1x, cp1y);
+      includeInto(this.__bbox, cp2x, cp2y);
+      includeInto(this.__bbox, x, y);
+      return super.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y);
+    }
+    quadraticCurveTo(cpx, cpy, x, y) {
+      includeInto(this.__bbox, cpx, cpy);
+      includeInto(this.__bbox, x, y);
+      return super.quadraticCurveTo(cpx, cpy, x, y);
+    }
+    arc(x, y, r, ...rest) {
+      includeInto(this.__bbox, x - r, y - r);
+      includeInto(this.__bbox, x + r, y + r);
+      return super.arc(x, y, r, ...rest);
+    }
+    arcTo(x1, y1, x2, y2, r) {
+      includeInto(this.__bbox, x1, y1);
+      includeInto(this.__bbox, x2, y2);
+      return super.arcTo(x1, y1, x2, y2, r);
+    }
+    ellipse(x, y, rx, ry, ...rest) {
+      includeInto(this.__bbox, x - rx, y - ry);
+      includeInto(this.__bbox, x + rx, y + ry);
+      return super.ellipse(x, y, rx, ry, ...rest);
+    }
+    addPath(path, transform) {
+      if (path && path.__bbox && Number.isFinite(path.__bbox.minX)) {
+        const b = path.__bbox;
+        const corners = [
+          [b.minX, b.minY],
+          [b.maxX, b.minY],
+          [b.minX, b.maxY],
+          [b.maxX, b.maxY],
+        ];
+        for (const [px, py] of corners) {
+          if (transform) {
+            includeInto(
+              this.__bbox,
+              transform.a * px + transform.c * py + transform.e,
+              transform.b * px + transform.d * py + transform.f,
+            );
+          } else {
+            includeInto(this.__bbox, px, py);
+          }
+        }
+      }
+      return super.addPath(path, transform);
+    }
+  }
+
+  TrackedPath2D.__tracked = true;
+  globalThis.Path2D = TrackedPath2D;
+}
+
+function transformBox(box, matrix) {
+  if (!Number.isFinite(box.minX) || !Number.isFinite(box.maxX)) {
+    return null;
+  }
+  const corners = [
+    [box.minX, box.minY],
+    [box.maxX, box.minY],
+    [box.minX, box.maxY],
+    [box.maxX, box.maxY],
+  ];
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const [px, py] of corners) {
+    const dx = matrix.a * px + matrix.c * py + matrix.e;
+    const dy = matrix.b * px + matrix.d * py + matrix.f;
+    if (dx < minX) minX = dx;
+    if (dy < minY) minY = dy;
+    if (dx > maxX) maxX = dx;
+    if (dy > maxY) maxY = dy;
+  }
+
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function isNearWhite(color, threshold) {
+  return (
+    color.a >= 0.85 &&
+    color.r >= threshold &&
+    color.g >= threshold &&
+    color.b >= threshold
+  );
+}
+
+function parseColor(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const s = value.trim().toLowerCase();
+
+  if (s.startsWith("#")) {
+    const hex = s.slice(1);
+    if (hex.length === 3) {
+      return {
+        r: parseInt(hex[0] + hex[0], 16),
+        g: parseInt(hex[1] + hex[1], 16),
+        b: parseInt(hex[2] + hex[2], 16),
+        a: 1,
+      };
+    }
+    if (hex.length === 6) {
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16),
+        a: 1,
+      };
+    }
+    return null;
+  }
+
+  const match = s.match(/rgba?\(([^)]+)\)/);
+  if (match) {
+    const parts = match[1].split(",").map((p) => p.trim());
+    if (parts.length >= 3) {
+      return {
+        r: parseChannel(parts[0]),
+        g: parseChannel(parts[1]),
+        b: parseChannel(parts[2]),
+        a: parts[3] === undefined ? 1 : Number(parts[3]),
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseChannel(part) {
+  if (part.endsWith("%")) {
+    return Math.round((Number(part.slice(0, -1)) / 100) * 255);
+  }
+  return Number(part);
 }
