@@ -653,7 +653,7 @@ function setStatus(message, type = "") {
 
 function getAvailableViewerWidth() {
   const width = els.viewerWrap?.clientWidth ?? els.viewer?.clientWidth ?? window.innerWidth;
-  return Math.max(0, width - 4);
+  return Math.max(0, Math.floor(width));
 }
 
 function getRenderScaleForWidth(baseWidth) {
@@ -666,7 +666,12 @@ function getRenderScaleForWidth(baseWidth) {
     return state.scale;
   }
 
-  return Math.min(state.scale, availableWidth / baseWidth);
+  const fitScale = availableWidth / baseWidth;
+  if (window.matchMedia('(max-width: 860px)').matches) {
+    return fitScale;
+  }
+
+  return Math.min(state.scale, fitScale);
 }
 
 function requestLayoutAwareRender() {
