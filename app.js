@@ -23,6 +23,7 @@ const state = {
   pdfDoc: null,
   pdfName: "",
   scale: 1,
+  viewerWidth: 0,
   renderToken: 0,
   // 穴埋め解除の設定
   revealAllOverlays: false,
@@ -53,8 +54,11 @@ const els = {
   revealedCount: document.querySelector("#revealed-count"),
   emptyState: document.querySelector("#empty-state"),
   status: document.querySelector("#status"),
+  viewerWrap: document.querySelector(".viewer-wrap"),
   viewer: document.querySelector("#viewer"),
 };
+
+let layoutRerenderFrame = 0;
 
 els.fileInput.addEventListener("change", async (event) => {
   const [file] = event.target.files;
@@ -124,6 +128,12 @@ els.thresholdInput.value = String(state.whiteThreshold);
 els.thresholdValue.textContent = String(state.whiteThreshold);
 updateControls();
 
+window.addEventListener("resize", requestLayoutAwareRender, { passive: true });
+if (typeof ResizeObserver === "function" && els.viewerWrap) {
+  const layoutObserver = new ResizeObserver(() => requestLayoutAwareRender());
+  layoutObserver.observe(els.viewerWrap);
+}
+
 async function loadPdf(source, name) {
   const token = ++state.renderToken;
   state.pdfDoc = null;
@@ -165,6 +175,7 @@ async function renderDocument() {
     return;
   }
 
+  state.viewerWidth = getAvailableViewerWidth();
   state.pageViews.clear();
   state.totalCovers = 0;
   els.viewer.replaceChildren();
@@ -211,8 +222,9 @@ async function buildPageShell(pageNumber, token) {
     return null;
   }
 
-  const viewport = page.getViewport({ scale: state.scale });
   const baseViewport = page.getViewport({ scale: 1 });
+  const renderScale = getRenderScaleForWidth(baseViewport.width);
+  const viewport = page.getViewport({ scale: renderScale });
   const widthPt = Math.round(baseViewport.width * 10) / 10;
   const heightPt = Math.round(baseViewport.height * 10) / 10;
 
@@ -232,7 +244,7 @@ async function buildPageShell(pageNumber, token) {
   coverLayer.className = "cover-layer";
 
   const outputScale = window.devicePixelRatio || 1;
-  const { canvas, covers } = await paintPdfPage(page, pageNumber, state.scale, outputScale);
+  const { canvas, covers } = await paintPdfPage(page, pageNumber, renderScale, outputScale);
   if (token !== state.renderToken) {
     return null;
   }
@@ -637,6 +649,44 @@ function updateControls() {
 function setStatus(message, type = "") {
   els.status.textContent = message;
   els.status.className = `status ${message ? "visible" : ""} ${type}`.trim();
+}
+
+function getAvailableViewerWidth() {
+  const width = els.viewerWrap?.clientWidth ?? els.viewer?.clientWidth ?? window.innerWidth;
+  return Math.max(0, width - 4);
+}
+
+function getRenderScaleForWidth(baseWidth) {
+  if (!Number.isFinite(baseWidth) || baseWidth <= 0) {
+    return state.scale;
+  }
+
+  const availableWidth = getAvailableViewerWidth();
+  if (availableWidth <= 0) {
+    return state.scale;
+  }
+
+  return Math.min(state.scale, availableWidth / baseWidth);
+}
+
+function requestLayoutAwareRender() {
+  if (!state.pdfDoc) {
+    return;
+  }
+
+  const nextViewerWidth = getAvailableViewerWidth();
+  if (Math.abs(nextViewerWidth - state.viewerWidth) < 1) {
+    return;
+  }
+
+  if (layoutRerenderFrame) {
+    cancelAnimationFrame(layoutRerenderFrame);
+  }
+
+  layoutRerenderFrame = requestAnimationFrame(() => {
+    layoutRerenderFrame = 0;
+    renderDocument();
+  });
 }
 
 function newBBox() {
