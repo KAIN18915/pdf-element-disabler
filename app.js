@@ -107,6 +107,9 @@ els.resetButton.addEventListener("click", () => {
 
 els.printButton.addEventListener("click", () => window.print());
 
+window.addEventListener("beforeprint", applyPrintLayout);
+window.addEventListener("afterprint", clearPrintLayout);
+
 els.colorInput.value = state.textColor;
 els.thresholdInput.value = String(state.whiteThreshold);
 els.thresholdValue.textContent = String(state.whiteThreshold);
@@ -201,8 +204,13 @@ async function buildPageShell(pageNumber, token) {
 
   const viewport = page.getViewport({ scale: state.scale });
 
+  const printViewport = page.getViewport({ scale: 1 });
+  const widthPt = Math.round(printViewport.width * 10) / 10;
+  const heightPt = Math.round(printViewport.height * 10) / 10;
+
   const shell = document.createElement("article");
   shell.className = "page-shell";
+  shell.dataset.page = String(pageNumber);
 
   const label = document.createElement("div");
   label.className = "page-label";
@@ -212,6 +220,8 @@ async function buildPageShell(pageNumber, token) {
   pageNode.className = "page";
   pageNode.style.width = `${viewport.width}px`;
   pageNode.style.height = `${viewport.height}px`;
+  pageNode.style.setProperty("--print-width", `${widthPt}pt`);
+  pageNode.style.setProperty("--print-height", `${heightPt}pt`);
 
   const canvas = document.createElement("canvas");
   const coverLayer = document.createElement("div");
@@ -255,7 +265,13 @@ async function buildPageShell(pageNumber, token) {
 
   paintCoverHits(coverLayer, covers, pageNumber);
 
-  const pageView = { pageNumber, shell, coverCount: covers.length };
+  const pageView = {
+    pageNumber,
+    shell,
+    coverCount: covers.length,
+    widthPt,
+    heightPt,
+  };
   state.pageViews.set(pageNumber, pageView);
   recountCovers();
 
@@ -518,6 +534,40 @@ function updateControls() {
 function setStatus(message, type = "") {
   els.status.textContent = message;
   els.status.className = `status ${message ? "visible" : ""} ${type}`.trim();
+}
+
+let printStyleEl = null;
+
+function applyPrintLayout() {
+  if (!state.pdfDoc || state.pageViews.size === 0) {
+    return;
+  }
+
+  const rules = ["@page { margin: 0; }"];
+  const sorted = [...state.pageViews.values()].sort((a, b) => a.pageNumber - b.pageNumber);
+
+  for (const view of sorted) {
+    const pageName = `pdf-page-${view.pageNumber}`;
+    rules.push(
+      `@page ${pageName} { size: ${view.widthPt}pt ${view.heightPt}pt; margin: 0; }`,
+      `.page-shell[data-page="${view.pageNumber}"] { page: ${pageName}; }`,
+    );
+  }
+
+  if (!printStyleEl) {
+    printStyleEl = document.createElement("style");
+    printStyleEl.id = "print-page-rules";
+    document.head.append(printStyleEl);
+  }
+  printStyleEl.textContent = rules.join("\n");
+  document.body.classList.add("is-printing");
+}
+
+function clearPrintLayout() {
+  document.body.classList.remove("is-printing");
+  if (printStyleEl) {
+    printStyleEl.textContent = "";
+  }
 }
 
 function newBBox() {
