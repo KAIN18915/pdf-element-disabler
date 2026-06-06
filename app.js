@@ -1,8 +1,15 @@
-import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.mjs";
+import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
 
 const EXPORT_RENDER_SCALE = 2;
-const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227";
+const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624";
 const PDF_LIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
+const SAMPLE_PDF_CANDIDATES = [
+  { url: "./main.pdf", name: "main.pdf" },
+  {
+    url: "https://mozilla.github.io/pdf.js/web/compressed.tracemonkey-pldi-09.pdf",
+    name: "サンプルPDF",
+  },
+];
 
 let pdfLibPromise = null;
 
@@ -13,7 +20,7 @@ function loadPdfLib() {
   return pdfLibPromise;
 }
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_DIST_URL}/build/pdf.worker.mjs`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_DIST_URL}/legacy/build/pdf.worker.mjs`;
 
 // PDF.js は図形を Path2D として組み立て、`ctx.fill(path2d)` で描画する。
 // その Path2D のバウンディングボックスを記録できるよう、Path2D を差し替える。
@@ -43,7 +50,9 @@ const els = {
   themeToggle: document.querySelector("#theme-toggle"),
   themeIcon: document.querySelector("#theme-icon"),
   fileInput: document.querySelector("#file-input"),
+  emptyFileInput: document.querySelector("#empty-file-input"),
   sampleButton: document.querySelector("#sample-button"),
+  emptySampleButton: document.querySelector("#empty-sample-button"),
   revealOverlaysToggle: document.querySelector("#reveal-overlays"),
   recolorToggle: document.querySelector("#recolor-text"),
   colorInput: document.querySelector("#text-color"),
@@ -63,16 +72,10 @@ const els = {
 let layoutRerenderFrame = 0;
 
 initThemeToggle();
+wireFileInputs();
+wireSampleButtons();
 
-els.fileInput.addEventListener("change", async (event) => {
-  const [file] = event.target.files;
-  if (!file) {
-    return;
-  }
-  await loadPdf(await file.arrayBuffer(), file.name);
-});
-
-els.sampleButton.addEventListener("click", () => loadPdf("./main.pdf", "main.pdf"));
+els.sampleButton.addEventListener("click", () => loadSamplePdf());
 
 els.scaleSelect.addEventListener("change", () => {
   state.scale = Number(els.scaleSelect.value);
@@ -154,19 +157,47 @@ async function loadPdf(source, name) {
     const loadingTask = pdfjsLib.getDocument(buildPdfDocumentOptions(source));
     const pdfDoc = await loadingTask.promise;
     if (token !== state.renderToken) {
-      return;
+      return false;
     }
 
     state.pdfDoc = pdfDoc;
     await renderDocument();
+    return true;
   } catch (error) {
     console.error(error);
     state.pdfDoc = null;
     els.emptyState.hidden = false;
     els.viewer.replaceChildren();
-    setStatus("PDFを読み込めませんでした。ファイル形式または配置を確認してください。", "error");
+    setStatus(formatPdfLoadError(error, name), "error");
     updateControls();
+    return false;
   }
+}
+
+async function loadSamplePdf() {
+  for (const candidate of SAMPLE_PDF_CANDIDATES) {
+    if (await loadPdf(candidate.url, candidate.name)) {
+      return;
+    }
+  }
+}
+
+function formatPdfLoadError(error, name) {
+  const message = String(error?.message || "");
+
+  if (message.includes("Missing PDF") || message.includes("Unexpected server response (404)")) {
+    return `${name} が見つかりません。リポジトリ直下に main.pdf を置くか、「PDFを選択」から開いてください。`;
+  }
+
+  if (message.includes("Invalid PDF") || error?.name === "InvalidPDFException") {
+    return `${name} は有効なPDFではありません。別のPDFファイルを選んでください。`;
+  }
+
+  if (window.location.protocol === "file:") {
+    return "file:// ではサンプルPDFを開けません。ローカルサーバーで index.html を開くか、「PDFを選択」を使ってください。";
+  }
+
+  return "PDFを読み込めませんでした。ファイル形式または配置を確認してください。";
 }
 
 function buildPdfDocumentOptions(source) {
@@ -923,4 +954,28 @@ function initThemeToggle() {
     localStorage.setItem("theme", isDark ? "dark" : "light");
     syncThemeIcon();
   });
+}
+
+function wireFileInputs() {
+  const inputs = [els.fileInput, els.emptyFileInput].filter(Boolean);
+  for (const input of inputs) {
+    input.addEventListener("change", async (event) => {
+      const [file] = event.target.files;
+      if (!file) {
+        return;
+      }
+      for (const other of inputs) {
+        if (other !== input) {
+          other.value = "";
+        }
+      }
+      await loadPdf(await file.arrayBuffer(), file.name);
+    });
+  }
+}
+
+function wireSampleButtons() {
+  if (els.emptySampleButton) {
+    els.emptySampleButton.addEventListener("click", () => loadSamplePdf());
+  }
 }

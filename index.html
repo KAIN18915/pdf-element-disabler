@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>穴埋め解除ビューア</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
     <script>
       (function () {
@@ -16,138 +22,165 @@
     </script>
   </head>
   <body>
-    <header class="app-header">
-      <div>
-        <p class="eyebrow">GitHub Pages ready</p>
-        <h1>穴埋め解除ビューア</h1>
-        <p class="lead">
-          先生が答えの上に乗せた「白い長方形」を消したり、「白文字（見えない文字）」に色を付けて、
-          隠された答えをブラウザ内で表示するツールです。
-        </p>
-      </div>
-      <div class="header-actions">
-        <button id="theme-toggle" class="btn btn-ghost btn-icon" type="button" aria-label="テーマを切り替え">
-          <span id="theme-icon" aria-hidden="true">☀</span>
-        </button>
-        <label class="file-button btn">
-          PDFを選択
-          <input id="file-input" type="file" accept="application/pdf,.pdf" />
-        </label>
-        <button id="sample-button" class="btn btn-outline" type="button">サンプルPDFを開く</button>
-      </div>
-    </header>
-
-    <main class="layout">
-      <aside class="toolbar" aria-label="操作">
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">穴埋め解除</h2>
-            <p class="card-description">白い被せ物や白文字を表示します</p>
-          </div>
-          <div class="card-content">
-            <label class="switch-row">
-              <span class="switch-label">白い被せ物をすべて消す</span>
-              <span class="switch">
-                <input id="reveal-overlays" type="checkbox" />
-                <span class="switch-track"><span class="switch-thumb"></span></span>
-              </span>
-            </label>
-            <label class="switch-row">
-              <span class="switch-label">白文字に色を付ける</span>
-              <span class="switch">
-                <input id="recolor-text" type="checkbox" />
-                <span class="switch-track"><span class="switch-thumb"></span></span>
-              </span>
-            </label>
-            <label class="color-row" for="text-color">
-              <span class="switch-label">表示する色</span>
-              <input id="text-color" type="color" value="#dd1133" />
-            </label>
-            <p id="tool-help" class="field-hint">
-              白い長方形の上にカーソルを重ね、枠が出た所をクリックすると、その被せ物だけを消せます。もう一度クリックで戻せます。
-            </p>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">感度</h2>
-            <p class="card-description">白とみなす明るさのしきい値</p>
-          </div>
-          <div class="card-content">
-            <label class="field-label" for="white-threshold">
-              明るさ <span id="white-threshold-value" class="slider-value">238</span>
-            </label>
-            <input id="white-threshold" class="slider" type="range" min="200" max="255" step="1" />
-            <p class="field-hint">
-              被せ物や白文字が消えない / 色が付かないときは、値を下げて薄いグレーも対象にしてください。
-            </p>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">表示</h2>
-            <p class="card-description">拡大率とPDFの書き出し</p>
-          </div>
-          <div class="card-content">
-            <label class="field-label" for="scale-select">拡大率</label>
-            <select id="scale-select" class="select">
-              <option value="0.8">80%</option>
-              <option value="1" selected>100%</option>
-              <option value="1.25">125%</option>
-              <option value="1.5">150%</option>
-              <option value="2">200%</option>
-            </select>
-            <button id="download-button" class="btn btn-block" type="button" disabled>編集済みPDFをダウンロード</button>
-            <p class="field-hint">
-              画面上の編集内容を反映したPDFファイルを、そのまま保存します（ブラウザの印刷機能は使いません）。
-            </p>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">編集</h2>
-          </div>
-          <div class="card-content">
-            <button id="reset-button" class="btn btn-outline btn-block" type="button" disabled>元の状態に戻す</button>
-            <p class="counter">
-              検出した被せ物
-              <span id="cover-count" class="badge">0</span>
-              個 / 表示中
-              <span id="revealed-count" class="badge">0</span>
-              個
-            </p>
-          </div>
-        </section>
-
-        <section class="alert" aria-label="メモ">
-          <p class="alert-title">メモ</p>
-          <p>
-            処理はブラウザ内だけで行われ、PDFはどこにも送信されません。被せ物の検出は白い塗りつぶしと白い文字が対象です。
-            画像で隠されている場合や、複雑なPDFでは検出できないことがあります。
-          </p>
-        </section>
-      </aside>
-
-      <section class="viewer-wrap" aria-live="polite">
-        <div id="empty-state" class="empty-state">
-          <div class="empty-state-icon" aria-hidden="true">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14 2 14 8 20 8" />
             </svg>
           </div>
-          <h2>PDFを読み込んでください</h2>
-          <p>
-            ローカルPDFを選択するか、このリポジトリに含まれる <code>main.pdf</code> をサンプルとして開けます。
-          </p>
+          <div class="brand-copy">
+            <div class="brand-row">
+              <h1 class="brand-title">穴埋め解除ビューア</h1>
+              <span class="badge badge-outline">GitHub Pages</span>
+            </div>
+            <p class="brand-description">
+              白い被せ物を消す・白文字に色を付けて、隠された答えをブラウザ内で表示します。
+            </p>
+          </div>
         </div>
-        <div id="status" class="status" role="status"></div>
-        <div id="viewer" class="viewer"></div>
-      </section>
-    </main>
+        <div class="topbar-actions">
+          <button id="theme-toggle" class="btn btn-ghost btn-icon" type="button" aria-label="テーマを切り替え">
+            <span id="theme-icon" aria-hidden="true">☾</span>
+          </button>
+          <div class="btn-group" role="group" aria-label="PDFを開く">
+            <button id="sample-button" class="btn btn-outline" type="button">サンプルを開く</button>
+            <label class="btn file-button">
+              PDFを選択
+              <input id="file-input" type="file" accept="application/pdf,.pdf" />
+            </label>
+          </div>
+        </div>
+      </header>
+
+      <div class="shell">
+        <aside class="sidebar" aria-label="操作">
+          <section class="card">
+            <div class="card-header">
+              <h2 class="card-title">穴埋め解除</h2>
+              <p class="card-description">被せ物と白文字の表示設定</p>
+            </div>
+            <div class="card-content">
+              <label class="switch-row">
+                <span class="switch-label">白い被せ物をすべて消す</span>
+                <span class="switch">
+                  <input id="reveal-overlays" type="checkbox" />
+                  <span class="switch-track"><span class="switch-thumb"></span></span>
+                </span>
+              </label>
+              <hr class="separator" />
+              <label class="switch-row">
+                <span class="switch-label">白文字に色を付ける</span>
+                <span class="switch">
+                  <input id="recolor-text" type="checkbox" />
+                  <span class="switch-track"><span class="switch-thumb"></span></span>
+                </span>
+              </label>
+              <label class="color-row" for="text-color">
+                <span class="switch-label">表示する色</span>
+                <input id="text-color" type="color" value="#dd1133" />
+              </label>
+              <p id="tool-help" class="field-hint">
+                白い長方形にカーソルを重ねてクリックすると、その被せ物だけを消せます。もう一度クリックで戻せます。
+              </p>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <h2 class="card-title">感度</h2>
+              <p class="card-description">白とみなす明るさのしきい値</p>
+            </div>
+            <div class="card-content">
+              <div class="field">
+                <label class="field-label" for="white-threshold">
+                  明るさ
+                  <span id="white-threshold-value" class="slider-value">238</span>
+                </label>
+                <input id="white-threshold" class="slider" type="range" min="200" max="255" step="1" />
+              </div>
+              <p class="field-hint">
+                検出されない場合は値を下げて、薄いグレーも対象にしてください。
+              </p>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <h2 class="card-title">表示</h2>
+              <p class="card-description">プレビューの拡大率</p>
+            </div>
+            <div class="card-content">
+              <div class="field">
+                <label class="field-label" for="scale-select">拡大率</label>
+                <select id="scale-select" class="select">
+                  <option value="0.8">80%</option>
+                  <option value="1" selected>100%</option>
+                  <option value="1.25">125%</option>
+                  <option value="1.5">150%</option>
+                  <option value="2">200%</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <div class="card-header-row">
+                <div>
+                  <h2 class="card-title">操作</h2>
+                  <p class="card-description">書き出しと編集のリセット</p>
+                </div>
+                <div class="badge-row" aria-label="被せ物の数">
+                  <span class="badge badge-outline">検出 <span id="cover-count">0</span></span>
+                  <span class="badge badge-secondary">表示 <span id="revealed-count">0</span></span>
+                </div>
+              </div>
+            </div>
+            <div class="card-footer">
+              <button id="download-button" class="btn btn-block" type="button" disabled>編集済みPDFをダウンロード</button>
+              <button id="reset-button" class="btn btn-outline btn-block" type="button" disabled>元の状態に戻す</button>
+              <p class="field-hint">
+                画面上の編集内容を反映したPDFを保存します（印刷機能は使いません）。
+              </p>
+            </div>
+          </section>
+
+          <section class="alert" aria-label="メモ">
+            <p class="alert-title">メモ</p>
+            <p>
+              処理はブラウザ内だけで行われ、PDFは送信されません。画像で隠された場合や複雑なPDFでは検出できないことがあります。
+            </p>
+          </section>
+        </aside>
+
+        <main class="main viewer-wrap" aria-live="polite">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-state-icon" aria-hidden="true">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+            </div>
+            <h2 class="empty-state-title">PDFを読み込んでください</h2>
+            <p class="empty-state-description">
+              ローカルPDFを選択するか、リポジトリの <code>main.pdf</code> をサンプルとして開けます。
+            </p>
+            <div class="empty-state-actions">
+              <label class="btn file-button">
+                PDFを選択
+                <input id="empty-file-input" type="file" accept="application/pdf,.pdf" />
+              </label>
+              <button id="empty-sample-button" class="btn btn-outline" type="button">サンプルを開く</button>
+            </div>
+          </div>
+          <div id="status" class="status" role="status"></div>
+          <div id="viewer" class="viewer"></div>
+        </main>
+      </div>
+    </div>
 
     <script type="module" src="./app.js"></script>
   </body>
