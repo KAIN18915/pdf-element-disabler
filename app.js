@@ -40,6 +40,8 @@ const state = {
 };
 
 const els = {
+  themeToggle: document.querySelector("#theme-toggle"),
+  themeIcon: document.querySelector("#theme-icon"),
   fileInput: document.querySelector("#file-input"),
   sampleButton: document.querySelector("#sample-button"),
   revealOverlaysToggle: document.querySelector("#reveal-overlays"),
@@ -59,6 +61,8 @@ const els = {
 };
 
 let layoutRerenderFrame = 0;
+
+initThemeToggle();
 
 els.fileInput.addEventListener("change", async (event) => {
   const [file] = event.target.files;
@@ -897,4 +901,26 @@ function parseChannel(part) {
     return Math.round((Number(part.slice(0, -1)) / 100) * 255);
   }
   return Number(part);
+}
+
+function initThemeToggle() {
+  if (!els.themeToggle) {
+    return;
+  }
+
+  const syncThemeIcon = () => {
+    const isDark = document.documentElement.classList.contains("dark");
+    if (els.themeIcon) {
+      els.themeIcon.textContent = isDark ? "☀" : "☾";
+    }
+    els.themeToggle.setAttribute("aria-label", isDark ? "ライトモードに切り替え" : "ダークモードに切り替え");
+  };
+
+  syncThemeIcon();
+
+  els.themeToggle.addEventListener("click", () => {
+    const isDark = document.documentElement.classList.toggle("dark");
+    localStorage.setItem("theme", isDark ? "dark" : "light");
+    syncThemeIcon();
+  });
 }
