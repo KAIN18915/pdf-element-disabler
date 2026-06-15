@@ -45,6 +45,13 @@ const state = {
   pageViews: new Map(),
   // 統計
   totalCovers: 0,
+  // 編集
+  editMode: null,
+  textEdits: [],
+  imagePlacements: [],
+  pendingImage: null,
+  editIdCounter: 0,
+  textEditTarget: null,
 };
 
 const els = {
@@ -69,6 +76,18 @@ const els = {
   status: document.querySelector("#status"),
   viewerWrap: document.querySelector(".viewer-wrap"),
   viewer: document.querySelector("#viewer"),
+  textEditModeButton: document.querySelector("#text-edit-mode-button"),
+  imageInsertModeButton: document.querySelector("#image-insert-mode-button"),
+  mergePdfInput: document.querySelector("#merge-pdf-input"),
+  imageFileInput: document.querySelector("#image-file-input"),
+  clearEditsButton: document.querySelector("#clear-edits-button"),
+  textEditCount: document.querySelector("#text-edit-count"),
+  imageEditCount: document.querySelector("#image-edit-count"),
+  editModeHint: document.querySelector("#edit-mode-hint"),
+  textEditDialog: document.querySelector("#text-edit-dialog"),
+  textEditInput: document.querySelector("#text-edit-input"),
+  textEditOriginal: document.querySelector("#text-edit-original"),
+  textEditCancel: document.querySelector("#text-edit-cancel"),
 };
 
 let layoutRerenderFrame = 0;
@@ -133,6 +152,8 @@ els.resetButton.addEventListener("click", () => {
 els.downloadRasterButton.addEventListener("click", () => downloadModifiedPdf());
 els.downloadVectorButton.addEventListener("click", () => downloadModifiedPdfVector());
 
+wireEditControls();
+
 els.colorInput.value = state.textColor;
 els.thresholdInput.value = String(state.whiteThreshold);
 els.thresholdValue.textContent = String(state.whiteThreshold);
@@ -144,14 +165,22 @@ if (typeof ResizeObserver === "function" && els.viewerWrap) {
   layoutObserver.observe(els.viewerWrap);
 }
 
-async function loadPdf(source, name) {
+async function loadPdf(source, name, options = {}) {
+  const { preserveEdits = false } = options;
   const token = ++state.renderToken;
   state.pdfDoc = null;
-  state.pdfBytes = null;
+  if (!preserveEdits) {
+    state.pdfBytes = null;
+  }
   state.pdfName = name;
   state.revealedCovers.clear();
   state.pageViews.clear();
   state.totalCovers = 0;
+  if (!preserveEdits) {
+    clearEdits({ rerender: false });
+  } else {
+    setEditMode(null);
+  }
   els.viewer.replaceChildren();
   els.emptyState.hidden = true;
   updateControls();
@@ -308,6 +337,9 @@ async function buildPageShell(pageNumber, token) {
   const coverLayer = document.createElement("div");
   coverLayer.className = "cover-layer";
 
+  const editLayer = document.createElement("div");
+  editLayer.className = "edit-layer";
+
   const outputScale = window.devicePixelRatio || 1;
   const { canvas, covers } = await paintPdfPage(page, pageNumber, viewport, renderScale, outputScale);
   if (token !== state.renderToken) {
@@ -316,10 +348,11 @@ async function buildPageShell(pageNumber, token) {
 
   canvas.style.width = `${viewport.width}px`;
   canvas.style.height = `${viewport.height}px`;
-  pageNode.append(canvas, coverLayer);
+  pageNode.append(canvas, coverLayer, editLayer);
   shell.append(label, pageNode);
 
   paintCoverHits(coverLayer, covers, pageNumber);
+  await paintEditLayer(editLayer, page, pageNumber, viewport, pageNode);
 
   const pageView = {
     pageNumber,
@@ -327,6 +360,8 @@ async function buildPageShell(pageNumber, token) {
     coverCount: covers.length,
     widthPt,
     heightPt,
+    viewport,
+    renderScale,
   };
   state.pageViews.set(pageNumber, pageView);
   recountCovers();
@@ -361,6 +396,7 @@ async function paintPdfPage(page, pageNumber, viewport, renderScale, outputScale
   }).promise;
 
   instrument.restore();
+  await drawUserEditsOnCanvas(context, pageNumber, viewport, outputScale);
   return { canvas, covers };
 }
 
@@ -457,7 +493,7 @@ async function downloadModifiedPdfVector() {
   setStatus("PDFを作成しています（ベクター）...");
 
   try {
-    const { PDFDocument } = await loadPdfLib();
+    const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
     const outDoc = await PDFDocument.load(pdfBytes.slice());
     await transformPdfContent(outDoc, {
       whiteThreshold: state.whiteThreshold,
@@ -466,13 +502,14 @@ async function downloadModifiedPdfVector() {
       recolorText: state.recolorText,
       textColor: state.textColor,
     });
+    await applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb });
 
     if (token !== state.renderToken) {
       return;
     }
 
     const bytes = await outDoc.save();
-    triggerDownload(bytes, buildDownloadName(pdfName, "_編集済み_ベクター"));
+    triggerDownload(bytes, buildVectorDownloadName(pdfName));
     setStatus(`${pdfName} の編集済みPDF（ベクター）をダウンロードしました。`);
   } catch (error) {
     console.error(error);
@@ -750,6 +787,7 @@ function recountCovers() {
 
 function updateControls() {
   const hasPdf = Boolean(state.pdfDoc);
+  const hasEdits = state.textEdits.length > 0 || state.imagePlacements.length > 0;
   els.downloadRasterButton.disabled = !hasPdf;
   els.downloadVectorButton.disabled = !hasPdf || !state.pdfBytes;
   els.resetButton.disabled = !hasPdf;
@@ -759,6 +797,28 @@ function updateControls() {
     ? state.totalCovers
     : state.revealedCovers.size;
   els.revealedCount.textContent = String(revealedVisible);
+
+  if (els.textEditModeButton) {
+    els.textEditModeButton.disabled = !hasPdf;
+    els.textEditModeButton.classList.toggle("active", state.editMode === "text");
+  }
+  if (els.imageInsertModeButton) {
+    els.imageInsertModeButton.disabled = !hasPdf;
+    els.imageInsertModeButton.classList.toggle("active", state.editMode === "image");
+  }
+  if (els.mergePdfInput) {
+    els.mergePdfInput.disabled = !hasPdf;
+  }
+  if (els.clearEditsButton) {
+    els.clearEditsButton.disabled = !hasPdf || !hasEdits;
+  }
+  if (els.textEditCount) {
+    els.textEditCount.textContent = String(state.textEdits.length);
+  }
+  if (els.imageEditCount) {
+    els.imageEditCount.textContent = String(state.imagePlacements.length);
+  }
+  updateEditModeHint();
 }
 
 function setStatus(message, type = "") {
@@ -1077,5 +1137,591 @@ function wireFileInputs() {
 function wireSampleButtons() {
   if (els.emptySampleButton) {
     els.emptySampleButton.addEventListener("click", () => loadSamplePdf());
+  }
+}
+
+function wireEditControls() {
+  if (els.textEditModeButton) {
+    els.textEditModeButton.addEventListener("click", () => {
+      setEditMode(state.editMode === "text" ? null : "text");
+    });
+  }
+
+  if (els.imageInsertModeButton) {
+    els.imageInsertModeButton.addEventListener("click", () => {
+      if (state.editMode === "image") {
+        setEditMode(null);
+        return;
+      }
+      els.imageFileInput?.click();
+    });
+  }
+
+  if (els.imageFileInput) {
+    els.imageFileInput.addEventListener("change", async (event) => {
+      const [file] = event.target.files;
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      await setPendingImage(file);
+      setEditMode("image");
+    });
+  }
+
+  if (els.mergePdfInput) {
+    els.mergePdfInput.addEventListener("change", async (event) => {
+      const [file] = event.target.files;
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      await mergePdfFile(file);
+    });
+  }
+
+  if (els.clearEditsButton) {
+    els.clearEditsButton.addEventListener("click", () => clearEdits());
+  }
+
+  if (els.textEditDialog) {
+    els.textEditDialog.addEventListener("close", () => {
+      state.textEditTarget = null;
+    });
+  }
+
+  if (els.textEditCancel) {
+    els.textEditCancel.addEventListener("click", () => {
+      els.textEditDialog?.close("cancel");
+    });
+  }
+
+  const textEditForm = els.textEditDialog?.querySelector("form");
+  if (textEditForm) {
+    textEditForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveTextEditFromDialog();
+    });
+  }
+}
+
+function setEditMode(mode) {
+  state.editMode = mode;
+  if (mode !== "image") {
+    state.pendingImage = null;
+  }
+  if (state.pdfDoc) {
+    void refreshEditLayers();
+  } else {
+    updateControls();
+  }
+}
+
+async function refreshEditLayers() {
+  const pages = [...state.pageViews.keys()];
+  for (const pageNumber of pages) {
+    await rerenderPage(pageNumber);
+  }
+  updateControls();
+}
+
+function updateEditModeHint() {
+  if (!els.editModeHint) {
+    return;
+  }
+  if (state.editMode === "text") {
+    els.editModeHint.textContent =
+      "文字をクリックして編集します。元の文字は白で覆い、新しい文字を重ねて表示します。";
+  } else if (state.editMode === "image" && state.pendingImage) {
+    els.editModeHint.textContent =
+      "配置したいページをクリックしてください。画像はクリック位置を左上として配置されます。";
+  } else if (state.editMode === "image") {
+    els.editModeHint.textContent = "画像ファイルを選択してください。";
+  } else {
+    els.editModeHint.textContent =
+      "編集モードを選ぶと、PDF上で文字をクリックして変更するか、画像を配置できます。穴埋め解除のクリック操作は一時的に無効になります。";
+  }
+}
+
+function generateEditId(prefix) {
+  state.editIdCounter += 1;
+  return `${prefix}-${state.editIdCounter}`;
+}
+
+function clearEdits({ rerender = true } = {}) {
+  state.textEdits = [];
+  state.imagePlacements = [];
+  state.pendingImage = null;
+  state.textEditTarget = null;
+  setEditMode(null);
+  if (rerender && state.pdfDoc) {
+    renderDocument();
+  } else {
+    updateControls();
+  }
+}
+
+async function setPendingImage(file) {
+  const mimeType = file.type || guessImageMimeType(file.name);
+  if (!["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+    setStatus("PNG / JPEG / WebP 形式の画像を選んでください。", "error");
+    return;
+  }
+
+  const imageBytes = new Uint8Array(await file.arrayBuffer());
+  const dimensions = await readImageDimensions(imageBytes, mimeType);
+  state.pendingImage = {
+    imageBytes,
+    mimeType,
+    width: dimensions.width,
+    height: dimensions.height,
+    name: file.name,
+  };
+  updateEditModeHint();
+}
+
+function guessImageMimeType(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".png")) {
+    return "image/png";
+  }
+  if (lower.endsWith(".webp")) {
+    return "image/webp";
+  }
+  return "image/jpeg";
+}
+
+function readImageDimensions(imageBytes, mimeType) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([imageBytes], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      URL.revokeObjectURL(url);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image load failed"));
+    };
+    image.src = url;
+  });
+}
+
+async function mergePdfFile(file) {
+  if (!state.pdfBytes) {
+    return;
+  }
+
+  setStatus(`${file.name} を結合しています...`);
+  try {
+    const { PDFDocument } = await loadPdfLib();
+    const appendBytes = new Uint8Array(await file.arrayBuffer());
+    const baseDoc = await PDFDocument.load(state.pdfBytes.slice());
+    const appendDoc = await PDFDocument.load(appendBytes);
+    const copiedPages = await baseDoc.copyPages(appendDoc, appendDoc.getPageIndices());
+    for (const page of copiedPages) {
+      baseDoc.addPage(page);
+    }
+    const mergedBytes = await baseDoc.save();
+    const mergedName = state.pdfName.replace(/\.pdf$/i, "") + "_結合.pdf";
+    await loadPdf(mergedBytes, mergedName, { preserveEdits: true });
+    setStatus(`${file.name} の ${appendDoc.getPageCount()} ページを結合しました。`);
+  } catch (error) {
+    console.error(error);
+    setStatus("PDFの結合に失敗しました。別のPDFで再試行してください。", "error");
+  }
+}
+
+async function getTextSpansForPage(page) {
+  const textContent = await page.getTextContent();
+  const spans = [];
+
+  for (let index = 0; index < textContent.items.length; index += 1) {
+    const item = textContent.items[index];
+    if (!item.str || !item.str.trim()) {
+      continue;
+    }
+
+    const transform = item.transform;
+    const fontSize = Math.hypot(transform[0], transform[1]);
+    const x = transform[4];
+    const y = transform[5];
+    const width = item.width || estimateTextWidth(item.str, fontSize);
+    const height = item.height || fontSize * 1.2;
+
+    spans.push({
+      index,
+      originalText: item.str,
+      x,
+      y,
+      width,
+      height,
+      fontSize,
+    });
+  }
+
+  return spans;
+}
+
+function estimateTextWidth(text, fontSize) {
+  return text.length * fontSize * 0.55;
+}
+
+function findTextEditForSpan(pageNumber, span) {
+  return state.textEdits.find(
+    (edit) =>
+      edit.pageNumber === pageNumber &&
+      edit.originalText === span.originalText &&
+      Math.abs(edit.x - span.x) < 0.5 &&
+      Math.abs(edit.y - span.y) < 0.5,
+  );
+}
+
+function makeTextEditId(pageNumber, span) {
+  return `text:${pageNumber}:${Math.round(span.x * 10)}:${Math.round(span.y * 10)}:${span.index}`;
+}
+
+async function paintEditLayer(layer, page, pageNumber, viewport, pageNode) {
+  layer.replaceChildren();
+  pageNode.classList.remove("edit-mode-text", "edit-mode-image");
+  if (state.editMode === "text") {
+    pageNode.classList.add("edit-mode-text");
+    await paintTextEditHits(layer, page, pageNumber, viewport);
+  } else if (state.editMode === "image") {
+    pageNode.classList.add("edit-mode-image");
+    paintImagePlacementHandler(layer, pageNumber, viewport, pageNode);
+  }
+
+  paintImagePlacements(layer, pageNumber, viewport);
+}
+
+async function paintTextEditHits(layer, page, pageNumber, viewport) {
+  const spans = await getTextSpansForPage(page);
+  const fragment = document.createDocumentFragment();
+
+  for (const span of spans) {
+    const cssBox = pdfBoxToCssBox(
+      { x: span.x, y: span.y, w: span.width, h: span.height },
+      viewport,
+    );
+    const existingEdit = findTextEditForSpan(pageNumber, span);
+    const hit = document.createElement("button");
+    hit.type = "button";
+    hit.className = `text-hit${existingEdit ? " edited" : ""}`;
+    hit.style.left = `${cssBox.x}px`;
+    hit.style.top = `${cssBox.y}px`;
+    hit.style.width = `${Math.max(cssBox.w, 8)}px`;
+    hit.style.height = `${Math.max(cssBox.h, 8)}px`;
+    hit.title = existingEdit
+      ? `編集済み: ${existingEdit.newText}`
+      : `クリックして編集: ${span.originalText}`;
+    hit.setAttribute("aria-label", hit.title);
+
+    hit.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openTextEditDialog(pageNumber, span, existingEdit);
+    });
+
+    fragment.append(hit);
+  }
+
+  layer.append(fragment);
+}
+
+function openTextEditDialog(pageNumber, span, existingEdit) {
+  if (!els.textEditDialog || !els.textEditInput || !els.textEditOriginal) {
+    return;
+  }
+
+  state.textEditTarget = {
+    pageNumber,
+    span,
+    existingEdit,
+    id: existingEdit?.id ?? makeTextEditId(pageNumber, span),
+  };
+  els.textEditOriginal.textContent = `元の文字: ${span.originalText}`;
+  els.textEditInput.value = existingEdit?.newText ?? span.originalText;
+  els.textEditDialog.showModal();
+  els.textEditInput.focus();
+  els.textEditInput.select();
+}
+
+function saveTextEditFromDialog() {
+  const target = state.textEditTarget;
+  if (!target || !els.textEditInput) {
+    return;
+  }
+
+  const newText = els.textEditInput.value;
+  if (!newText.trim()) {
+    setStatus("空の文字には変更できません。", "error");
+    return;
+  }
+
+  const { pageNumber, span, existingEdit, id } = target;
+  const edit = {
+    id,
+    pageNumber,
+    x: span.x,
+    y: span.y,
+    width: span.width,
+    height: span.height,
+    fontSize: span.fontSize,
+    newText,
+    originalText: span.originalText,
+  };
+
+  if (existingEdit) {
+    const index = state.textEdits.findIndex((item) => item.id === existingEdit.id);
+    if (index >= 0) {
+      state.textEdits[index] = edit;
+    }
+  } else {
+    state.textEdits.push(edit);
+  }
+
+  els.textEditDialog?.close("save");
+  rerenderPage(pageNumber);
+  setStatus(`ページ ${pageNumber} の文字を編集しました。`);
+  updateControls();
+}
+
+function paintImagePlacementHandler(layer, pageNumber, viewport, pageNode) {
+  if (!state.pendingImage) {
+    return;
+  }
+
+  if (layer._imagePlacementHandler) {
+    layer.removeEventListener("click", layer._imagePlacementHandler);
+  }
+
+  const handler = (event) => {
+    if (!state.pendingImage || state.editMode !== "image") {
+      return;
+    }
+    const rect = pageNode.getBoundingClientRect();
+    const cssX = event.clientX - rect.left;
+    const cssY = event.clientY - rect.top;
+    const pdfPoint = viewport.convertToPdfPoint(cssX, cssY);
+    placeImageOnPage(pageNumber, pdfPoint[0], pdfPoint[1], viewport);
+  };
+
+  layer._imagePlacementHandler = handler;
+  layer.addEventListener("click", handler);
+}
+
+function placeImageOnPage(pageNumber, pdfX, pdfY, viewport) {
+  if (!state.pendingImage) {
+    return;
+  }
+
+  const pageView = state.pageViews.get(pageNumber);
+  const pageWidth = pageView?.widthPt ?? viewport.width;
+  const maxWidth = Math.min(200, pageWidth * 0.4);
+  const aspect = state.pendingImage.width / state.pendingImage.height;
+  const width = maxWidth;
+  const height = width / aspect;
+
+  const placement = {
+    id: generateEditId("image"),
+    pageNumber,
+    x: pdfX,
+    y: pdfY - height,
+    width,
+    height,
+    imageBytes: state.pendingImage.imageBytes,
+    mimeType: state.pendingImage.mimeType,
+  };
+
+  state.imagePlacements.push(placement);
+  rerenderPage(pageNumber);
+  setStatus(`ページ ${pageNumber} に画像を配置しました。`);
+  updateControls();
+}
+
+function paintImagePlacements(layer, pageNumber, viewport) {
+  const placements = state.imagePlacements.filter((item) => item.pageNumber === pageNumber);
+  const fragment = document.createDocumentFragment();
+
+  for (const placement of placements) {
+    const cssBox = pdfBoxToCssBox(
+      { x: placement.x, y: placement.y, w: placement.width, h: placement.height },
+      viewport,
+    );
+    const image = document.createElement("img");
+    image.className = "image-placement";
+    image.alt = "挿入画像";
+    image.style.left = `${cssBox.x}px`;
+    image.style.top = `${cssBox.y}px`;
+    image.style.width = `${cssBox.w}px`;
+    image.style.height = `${cssBox.h}px`;
+    const blob = new Blob([placement.imageBytes], { type: placement.mimeType });
+    image.src = URL.createObjectURL(blob);
+    image.addEventListener("load", () => URL.revokeObjectURL(image.src), { once: true });
+    fragment.append(image);
+  }
+
+  layer.append(fragment);
+}
+
+function pdfBoxToCssBox(pdfBBox, viewport) {
+  const x1 = pdfBBox.x;
+  const y1 = pdfBBox.y;
+  const x2 = pdfBBox.x + pdfBBox.w;
+  const y2 = pdfBBox.y + pdfBBox.h;
+  const corners = [
+    viewport.convertToViewportPoint(x1, y1),
+    viewport.convertToViewportPoint(x2, y1),
+    viewport.convertToViewportPoint(x1, y2),
+    viewport.convertToViewportPoint(x2, y2),
+  ];
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const [px, py] of corners) {
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  }
+
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+async function drawUserEditsOnCanvas(context, pageNumber, viewport, outputScale) {
+  const textEdits = state.textEdits.filter((edit) => edit.pageNumber === pageNumber);
+  const imagePlacements = state.imagePlacements.filter((item) => item.pageNumber === pageNumber);
+  if (textEdits.length === 0 && imagePlacements.length === 0) {
+    return;
+  }
+
+  context.save();
+  if (outputScale !== 1) {
+    context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+  }
+
+  for (const edit of textEdits) {
+    drawTextEditOnCanvas(context, edit, viewport);
+  }
+
+  for (const placement of imagePlacements) {
+    await drawImagePlacementOnCanvas(context, placement, viewport);
+  }
+
+  context.restore();
+}
+
+function drawTextEditOnCanvas(context, edit, viewport) {
+  const cssBox = pdfBoxToCssBox(
+    {
+      x: edit.x - 1,
+      y: edit.y - edit.fontSize * 0.15,
+      w: Math.max(edit.width, estimateTextWidth(edit.newText, edit.fontSize)) + 2,
+      h: edit.height + 2,
+    },
+    viewport,
+  );
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(cssBox.x, cssBox.y, cssBox.w, cssBox.h);
+
+  const baseline = viewport.convertToViewportPoint(edit.x, edit.y);
+  const fontSizeCss = edit.fontSize * viewport.scale;
+  context.fillStyle = "#000000";
+  context.font = `${fontSizeCss}px Helvetica, Arial, sans-serif`;
+  context.textBaseline = "alphabetic";
+  context.fillText(edit.newText, baseline[0], baseline[1]);
+}
+
+async function drawImagePlacementOnCanvas(context, placement, viewport) {
+  const cssBox = pdfBoxToCssBox(
+    { x: placement.x, y: placement.y, w: placement.width, h: placement.height },
+    viewport,
+  );
+  const blob = new Blob([placement.imageBytes], { type: placement.mimeType });
+  const url = URL.createObjectURL(blob);
+
+  try {
+    const image = await loadHtmlImage(url);
+    context.drawImage(image, cssBox.x, cssBox.y, cssBox.w, cssBox.h);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function loadHtmlImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("image load failed"));
+    image.src = url;
+  });
+}
+
+async function applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb }) {
+  if (state.textEdits.length === 0 && state.imagePlacements.length === 0) {
+    return;
+  }
+
+  const helvetica = await outDoc.embedFont(StandardFonts.Helvetica);
+
+  for (const edit of state.textEdits) {
+    const page = outDoc.getPage(edit.pageNumber - 1);
+    const pad = 1;
+    page.drawRectangle({
+      x: edit.x - pad,
+      y: edit.y - edit.fontSize * 0.2,
+      width: Math.max(edit.width, estimateTextWidth(edit.newText, edit.fontSize)) + pad * 2,
+      height: edit.height + pad,
+      color: rgb(1, 1, 1),
+      borderWidth: 0,
+    });
+    page.drawText(edit.newText, {
+      x: edit.x,
+      y: edit.y,
+      size: edit.fontSize,
+      font: helvetica,
+      color: rgb(0, 0, 0),
+    });
+  }
+
+  for (const placement of state.imagePlacements) {
+    const page = outDoc.getPage(placement.pageNumber - 1);
+    let embeddedImage;
+    if (placement.mimeType === "image/png") {
+      embeddedImage = await outDoc.embedPng(placement.imageBytes);
+    } else if (placement.mimeType === "image/jpeg") {
+      embeddedImage = await outDoc.embedJpg(placement.imageBytes);
+    } else {
+      const pngBytes = await convertImageToPngBytes(placement.imageBytes, placement.mimeType);
+      embeddedImage = await outDoc.embedPng(pngBytes);
+    }
+    page.drawImage(embeddedImage, {
+      x: placement.x,
+      y: placement.y,
+      width: placement.width,
+      height: placement.height,
+    });
+  }
+}
+
+async function convertImageToPngBytes(imageBytes, mimeType) {
+  const blob = new Blob([imageBytes], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = await loadHtmlImage(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    return canvasToPngBytes(canvas);
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }

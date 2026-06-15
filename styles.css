@@ -794,6 +794,153 @@ input {
   border-color: var(--destructive-border-strong);
 }
 
+/* ── Edit mode ── */
+.mode-toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.mode-button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.mode-button.active:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.text-input {
+  width: 100%;
+  height: 2.25rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 0.875rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.text-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.edit-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.page.edit-mode-text .cover-layer,
+.page.edit-mode-image .cover-layer {
+  pointer-events: none;
+}
+
+.page.edit-mode-text .cover-hit,
+.page.edit-mode-image .cover-hit {
+  pointer-events: none;
+}
+
+.page.edit-mode-text .edit-layer,
+.page.edit-mode-image .edit-layer {
+  pointer-events: auto;
+}
+
+.page.edit-mode-image {
+  cursor: crosshair;
+}
+
+.text-hit {
+  position: absolute;
+  min-height: 0;
+  padding: 0;
+  border: 1px dashed transparent;
+  border-radius: 0.15rem;
+  background: transparent;
+  color: transparent;
+  pointer-events: auto;
+  cursor: text;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.text-hit:hover,
+.text-hit:focus-visible {
+  background: rgb(59 130 246 / 12%);
+  border-color: rgb(59 130 246 / 55%);
+  outline: none;
+}
+
+.text-hit.edited {
+  border-color: rgb(34 197 94 / 55%);
+}
+
+.text-hit.edited:hover,
+.text-hit.edited:focus-visible {
+  background: rgb(34 197 94 / 12%);
+}
+
+.image-placement-preview {
+  position: absolute;
+  border: 2px dashed rgb(59 130 246 / 70%);
+  border-radius: 0.15rem;
+  background: rgb(59 130 246 / 8%);
+  pointer-events: none;
+}
+
+.image-placement {
+  position: absolute;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.text-edit-dialog {
+  width: min(24rem, calc(100vw - 2rem));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow-lg);
+}
+
+.text-edit-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.text-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.25rem;
+}
+
+.text-edit-title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.text-edit-original {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.text-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 /* ── Responsive ── */
 @media (min-width: 900px) {
   .brand-description {
