@@ -1,5 +1,5 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
-
+import { makeCoverKey, transformPdfContent } from "./pdf-content-transform.js";
 const EXPORT_RENDER_SCALE = 2;
 const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624";
 const PDF_LIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
@@ -28,6 +28,7 @@ installTrackedPath2D();
 
 const state = {
   pdfDoc: null,
+  pdfBytes: null,
   pdfName: "",
   scale: 1,
   viewerWidth: 0,
@@ -38,7 +39,7 @@ const state = {
   textColor: "#dd1133",
   // 「白」とみなす最小の明るさ (0-255)。値が小さいほど薄いグレーも対象になる。
   whiteThreshold: 238,
-  // 個別に表示した被せ物のキー (`page:index`)
+  // 個別に表示した被せ物のキー (PDF user-space bbox)
   revealedCovers: new Set(),
   // ページごとの描画情報
   pageViews: new Map(),
@@ -59,7 +60,8 @@ const els = {
   thresholdInput: document.querySelector("#white-threshold"),
   thresholdValue: document.querySelector("#white-threshold-value"),
   scaleSelect: document.querySelector("#scale-select"),
-  downloadButton: document.querySelector("#download-button"),
+  downloadRasterButton: document.querySelector("#download-raster-button"),
+  downloadVectorButton: document.querySelector("#download-vector-button"),
   resetButton: document.querySelector("#reset-button"),
   coverCount: document.querySelector("#cover-count"),
   revealedCount: document.querySelector("#revealed-count"),
@@ -128,7 +130,8 @@ els.resetButton.addEventListener("click", () => {
   }
 });
 
-els.downloadButton.addEventListener("click", () => downloadModifiedPdf());
+els.downloadRasterButton.addEventListener("click", () => downloadModifiedPdf());
+els.downloadVectorButton.addEventListener("click", () => downloadModifiedPdfVector());
 
 els.colorInput.value = state.textColor;
 els.thresholdInput.value = String(state.whiteThreshold);
@@ -144,6 +147,7 @@ if (typeof ResizeObserver === "function" && els.viewerWrap) {
 async function loadPdf(source, name) {
   const token = ++state.renderToken;
   state.pdfDoc = null;
+  state.pdfBytes = null;
   state.pdfName = name;
   state.revealedCovers.clear();
   state.pageViews.clear();
@@ -154,18 +158,36 @@ async function loadPdf(source, name) {
   setStatus(`${name} を読み込んでいます...`);
 
   try {
-    const loadingTask = pdfjsLib.getDocument(buildPdfDocumentOptions(source));
+    let pdfBytes = null;
+    let documentSource = source;
+
+    if (typeof source === "string") {
+      const response = await fetch(source);
+      if (!response.ok) {
+        throw new Error(`Unexpected server response (${response.status})`);
+      }
+      const buffer = await response.arrayBuffer();
+      pdfBytes = new Uint8Array(buffer);
+      documentSource = pdfBytes;
+    } else {
+      pdfBytes = source instanceof Uint8Array ? source : new Uint8Array(source);
+      documentSource = pdfBytes;
+    }
+
+    const loadingTask = pdfjsLib.getDocument(buildPdfDocumentOptions(documentSource));
     const pdfDoc = await loadingTask.promise;
     if (token !== state.renderToken) {
       return false;
     }
 
     state.pdfDoc = pdfDoc;
+    state.pdfBytes = pdfBytes;
     await renderDocument();
     return true;
   } catch (error) {
     console.error(error);
     state.pdfDoc = null;
+    state.pdfBytes = null;
     els.emptyState.hidden = false;
     els.viewer.replaceChildren();
     setStatus(formatPdfLoadError(error, name), "error");
@@ -287,7 +309,7 @@ async function buildPageShell(pageNumber, token) {
   coverLayer.className = "cover-layer";
 
   const outputScale = window.devicePixelRatio || 1;
-  const { canvas, covers } = await paintPdfPage(page, pageNumber, renderScale, outputScale);
+  const { canvas, covers } = await paintPdfPage(page, pageNumber, viewport, renderScale, outputScale);
   if (token !== state.renderToken) {
     return null;
   }
@@ -312,8 +334,7 @@ async function buildPageShell(pageNumber, token) {
   return shell;
 }
 
-async function paintPdfPage(page, pageNumber, renderScale, outputScale) {
-  const viewport = page.getViewport({ scale: renderScale });
+async function paintPdfPage(page, pageNumber, viewport, renderScale, outputScale) {
   const canvas = document.createElement("canvas");
   canvas.width = Math.floor(viewport.width * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
@@ -329,6 +350,7 @@ async function paintPdfPage(page, pageNumber, renderScale, outputScale) {
     canvas,
     outputScale,
     pageNumber,
+    viewport,
     covers,
   });
 
@@ -349,8 +371,9 @@ async function downloadModifiedPdf() {
   }
 
   const token = state.renderToken;
-  els.downloadButton.disabled = true;
-  setStatus("PDFを作成しています...");
+  els.downloadRasterButton.disabled = true;
+  els.downloadVectorButton.disabled = true;
+  setStatus("PDFを作成しています（画像）...");
 
   try {
     const { PDFDocument } = await loadPdfLib();
@@ -367,9 +390,11 @@ async function downloadModifiedPdf() {
       const widthPt = view?.widthPt ?? page.getViewport({ scale: 1 }).width;
       const heightPt = view?.heightPt ?? page.getViewport({ scale: 1 }).height;
 
+      const exportViewport = page.getViewport({ scale: EXPORT_RENDER_SCALE });
       const { canvas } = await paintPdfPage(
         page,
         pageNumber,
+        exportViewport,
         EXPORT_RENDER_SCALE,
         EXPORT_RENDER_SCALE,
       );
@@ -391,7 +416,7 @@ async function downloadModifiedPdf() {
 
     const bytes = await outDoc.save();
     triggerDownload(bytes, buildDownloadName(pdfName));
-    setStatus(`${pdfName} の編集済みPDFをダウンロードしました。`);
+    setStatus(`${pdfName} の編集済みPDF（画像）をダウンロードしました。`);
   } catch (error) {
     console.error(error);
     setStatus(
@@ -420,9 +445,56 @@ function canvasToPngBytes(canvas) {
   });
 }
 
+async function downloadModifiedPdfVector() {
+  const { pdfBytes, pdfName } = state;
+  if (!pdfBytes || state.pageViews.size === 0) {
+    return;
+  }
+
+  const token = state.renderToken;
+  els.downloadRasterButton.disabled = true;
+  els.downloadVectorButton.disabled = true;
+  setStatus("PDFを作成しています（ベクター）...");
+
+  try {
+    const { PDFDocument } = await loadPdfLib();
+    const outDoc = await PDFDocument.load(pdfBytes.slice());
+    await transformPdfContent(outDoc, {
+      whiteThreshold: state.whiteThreshold,
+      revealAllOverlays: state.revealAllOverlays,
+      revealedCovers: state.revealedCovers,
+      recolorText: state.recolorText,
+      textColor: state.textColor,
+    });
+
+    if (token !== state.renderToken) {
+      return;
+    }
+
+    const bytes = await outDoc.save();
+    triggerDownload(bytes, buildDownloadName(pdfName, "_編集済み_ベクター"));
+    setStatus(`${pdfName} の編集済みPDF（ベクター）をダウンロードしました。`);
+  } catch (error) {
+    console.error(error);
+    setStatus(
+      "ベクターPDFの作成に失敗しました。画像で保存を試すか、別のPDFで再試行してください。",
+      "error",
+    );
+  } finally {
+    if (token === state.renderToken) {
+      updateControls();
+    }
+  }
+}
+
 function buildDownloadName(name) {
   const base = name.replace(/\.pdf$/i, "") || "document";
   return `${base}_編集済み.pdf`;
+}
+
+function buildVectorDownloadName(name) {
+  const base = name.replace(/\.pdf$/i, "") || "document";
+  return `${base}_編集済み_ベクター.pdf`;
 }
 
 function triggerDownload(bytes, filename) {
@@ -457,7 +529,6 @@ function instrumentContext(ctx, info) {
   };
 
   let bbox = newBBox();
-  let coverIndex = 0;
   const canvasArea = info.canvas.width * info.canvas.height;
 
   const include = (x, y) => {
@@ -544,8 +615,8 @@ function instrumentContext(ctx, info) {
       return;
     }
 
-    const id = coverIndex++;
-    const key = `${info.pageNumber}:${id}`;
+    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+    const key = makeCoverKey(info.pageNumber, pdfBBox);
     const revealed = state.revealAllOverlays || state.revealedCovers.has(key);
 
     info.covers.push({
@@ -679,7 +750,8 @@ function recountCovers() {
 
 function updateControls() {
   const hasPdf = Boolean(state.pdfDoc);
-  els.downloadButton.disabled = !hasPdf;
+  els.downloadRasterButton.disabled = !hasPdf;
+  els.downloadVectorButton.disabled = !hasPdf || !state.pdfBytes;
   els.resetButton.disabled = !hasPdf;
   els.coverCount.textContent = String(state.totalCovers);
 
@@ -875,6 +947,33 @@ function transformBox(box, matrix) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+function deviceBoxToPdfBBox(device, outputScale, viewport) {
+  const x1 = device.x / outputScale;
+  const y1 = device.y / outputScale;
+  const x2 = (device.x + device.w) / outputScale;
+  const y2 = (device.y + device.h) / outputScale;
+  const corners = [
+    viewport.convertToPdfPoint(x1, y1),
+    viewport.convertToPdfPoint(x2, y1),
+    viewport.convertToPdfPoint(x1, y2),
+    viewport.convertToPdfPoint(x2, y2),
+  ];
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const [px, py] of corners) {
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+  }
+
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 function isNearWhite(color, threshold) {
   return (
     color.a >= 0.85 &&
@@ -969,7 +1068,8 @@ function wireFileInputs() {
           other.value = "";
         }
       }
-      await loadPdf(await file.arrayBuffer(), file.name);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await loadPdf(bytes, file.name);
     });
   }
 }

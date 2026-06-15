@@ -140,10 +140,11 @@
               </div>
             </div>
             <div class="card-footer">
-              <button id="download-button" class="btn btn-block" type="button" disabled>編集済みPDFをダウンロード</button>
+              <button id="download-raster-button" class="btn btn-block" type="button" disabled>画像で保存</button>
+              <button id="download-vector-button" class="btn btn-outline btn-block" type="button" disabled>ベクターで保存</button>
               <button id="reset-button" class="btn btn-outline btn-block" type="button" disabled>元の状態に戻す</button>
               <p class="field-hint">
-                画面上の編集内容を反映したPDFを保存します（印刷機能は使いません）。
+                「画像で保存」は各ページを画像として再構成します。「ベクターで保存」は元のPDF構造を保ちつつ白い被せ物の除去と文字色の変更を反映します。
               </p>
             </div>
           </section>
