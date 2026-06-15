@@ -107,6 +107,47 @@
             </div>
           </section>
 
+          <section class="card" id="edit-section">
+            <div class="card-header">
+              <div class="card-header-row">
+                <div>
+                  <h2 class="card-title">編集</h2>
+                  <p class="card-description">文字・画像の追加とPDF結合</p>
+                </div>
+                <div class="badge-row" aria-label="編集の数">
+                  <span class="badge badge-outline">文字 <span id="text-edit-count">0</span></span>
+                  <span class="badge badge-secondary">画像 <span id="image-edit-count">0</span></span>
+                </div>
+              </div>
+            </div>
+            <div class="card-content">
+              <div class="mode-toggle-group" role="group" aria-label="編集モード">
+                <button id="text-edit-mode-button" class="btn btn-outline btn-block mode-button" type="button" disabled>
+                  文字を編集
+                </button>
+                <button id="image-insert-mode-button" class="btn btn-outline btn-block mode-button" type="button" disabled>
+                  画像を挿入
+                </button>
+              </div>
+              <p id="edit-mode-hint" class="field-hint">
+                編集モードを選ぶと、PDF上で文字をクリックして変更するか、画像を配置できます。穴埋め解除のクリック操作は一時的に無効になります。
+              </p>
+              <hr class="separator" />
+              <label class="btn btn-outline btn-block file-button" id="merge-pdf-label">
+                PDFを追加
+                <input id="merge-pdf-input" type="file" accept="application/pdf,.pdf" disabled />
+              </label>
+              <p class="field-hint">
+                別のPDFの全ページを現在の文書の末尾に結合します。
+              </p>
+            </div>
+            <div class="card-footer">
+              <button id="clear-edits-button" class="btn btn-outline btn-block" type="button" disabled>編集をクリア</button>
+            </div>
+          </section>
+
+          <input id="image-file-input" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" hidden />
+
           <section class="card">
             <div class="card-header">
               <h2 class="card-title">表示</h2>
@@ -182,6 +223,21 @@
         </main>
       </div>
     </div>
+
+    <dialog id="text-edit-dialog" class="text-edit-dialog">
+      <form method="dialog" class="text-edit-form">
+        <h3 class="text-edit-title">文字を編集</h3>
+        <p id="text-edit-original" class="text-edit-original"></p>
+        <label class="field" for="text-edit-input">
+          <span class="field-label">新しい文字</span>
+          <input id="text-edit-input" class="text-input" type="text" autocomplete="off" />
+        </label>
+        <div class="text-edit-actions">
+          <button id="text-edit-cancel" class="btn btn-outline" type="button" value="cancel">キャンセル</button>
+          <button id="text-edit-save" class="btn" type="submit" value="save">適用</button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="app.js"></script>
   </body>
