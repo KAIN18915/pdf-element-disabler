@@ -5,7 +5,12 @@ import {
   needsContentStreamTransform,
   transformPdfContent,
 } from "./pdf-content-transform.js";
-import { estimateTextWidth, getTextSpansForPage } from "./text-span-utils.js";
+import {
+  estimateTextWidth,
+  getTextSpansForPage,
+  pdfBBoxToCssBox,
+} from "./text-span-utils.js";
+import { PdfFontResolver, resolveCanvasFont } from "./font-matching.js";
 const EXPORT_RENDER_SCALE = 2;
 const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624";
 const SAMPLE_PDF_CANDIDATES = [
@@ -267,6 +272,7 @@ function buildPdfDocumentOptions(source) {
     cMapUrl: `${PDFJS_DIST_URL}/cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${PDFJS_DIST_URL}/standard_fonts/`,
+    fontExtraProperties: true,
   };
 }
 
@@ -1391,15 +1397,15 @@ async function paintTextEditHits(layer, page, pageNumber, viewport) {
   const fragment = document.createDocumentFragment();
 
   for (const span of spans) {
-    const cssBox = pdfBoxToCssBox(span.bbox, viewport);
+    const cssBox = pdfBBoxToCssBox(span.bbox, viewport);
     const existingEdit = findTextEditForSpan(pageNumber, span);
     const hit = document.createElement("button");
     hit.type = "button";
     hit.className = `text-hit${existingEdit ? " edited" : ""}`;
     hit.style.left = `${cssBox.x}px`;
     hit.style.top = `${cssBox.y}px`;
-    hit.style.width = `${Math.max(cssBox.w, 8)}px`;
-    hit.style.height = `${Math.max(cssBox.h, 8)}px`;
+    hit.style.width = `${Math.max(cssBox.w, 6)}px`;
+    hit.style.height = `${Math.max(cssBox.h, 4)}px`;
     hit.title = existingEdit
       ? `編集済み: ${existingEdit.newText}`
       : `クリックして編集: ${span.originalText}`;
@@ -1458,6 +1464,11 @@ function saveTextEditFromDialog() {
     baselineX: span.x,
     baselineY: span.y,
     fontSize: span.fontSize,
+    fontName: span.fontName ?? null,
+    fontFamily: span.fontFamily ?? null,
+    fontSubstitution: span.fontSubstitution ?? null,
+    fontSubstitutionLoadedName: span.fontSubstitutionLoadedName ?? null,
+    fontVertical: span.fontVertical ?? false,
     newText,
     originalText: span.originalText,
   };
@@ -1535,7 +1546,7 @@ function paintImagePlacements(layer, pageNumber, viewport) {
   const fragment = document.createDocumentFragment();
 
   for (const placement of placements) {
-    const cssBox = pdfBoxToCssBox(
+    const cssBox = pdfBBoxToCssBox(
       { x: placement.x, y: placement.y, w: placement.width, h: placement.height },
       viewport,
     );
@@ -1553,33 +1564,6 @@ function paintImagePlacements(layer, pageNumber, viewport) {
   }
 
   layer.append(fragment);
-}
-
-function pdfBoxToCssBox(pdfBBox, viewport) {
-  const x1 = pdfBBox.x;
-  const y1 = pdfBBox.y;
-  const x2 = pdfBBox.x + pdfBBox.w;
-  const y2 = pdfBBox.y + pdfBBox.h;
-  const corners = [
-    viewport.convertToViewportPoint(x1, y1),
-    viewport.convertToViewportPoint(x2, y1),
-    viewport.convertToViewportPoint(x1, y2),
-    viewport.convertToViewportPoint(x2, y2),
-  ];
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  for (const [px, py] of corners) {
-    minX = Math.min(minX, px);
-    minY = Math.min(minY, py);
-    maxX = Math.max(maxX, px);
-    maxY = Math.max(maxY, py);
-  }
-
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 async function drawUserEditsOnCanvas(context, pageNumber, viewport, outputScale) {
@@ -1611,7 +1595,7 @@ function drawTextEditOnCanvas(context, edit, viewport) {
     edit.width,
     estimateTextWidth(edit.newText, edit.fontSize) + pad * 2,
   );
-  const cssBox = pdfBoxToCssBox(
+  const cssBox = pdfBBoxToCssBox(
     {
       x: edit.x - pad,
       y: edit.y - pad,
@@ -1628,15 +1612,14 @@ function drawTextEditOnCanvas(context, edit, viewport) {
     edit.baselineX ?? edit.x,
     edit.baselineY ?? edit.y,
   );
-  const fontSizeCss = edit.fontSize * viewport.scale;
   context.fillStyle = "#000000";
-  context.font = `${fontSizeCss}px Helvetica, Arial, sans-serif`;
+  context.font = resolveCanvasFont(edit, viewport.scale);
   context.textBaseline = "alphabetic";
   context.fillText(edit.newText, baseline[0], baseline[1]);
 }
 
 async function drawImagePlacementOnCanvas(context, placement, viewport) {
-  const cssBox = pdfBoxToCssBox(
+  const cssBox = pdfBBoxToCssBox(
     { x: placement.x, y: placement.y, w: placement.width, h: placement.height },
     viewport,
   );
@@ -1665,10 +1648,11 @@ async function applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb }) {
     return;
   }
 
-  const helvetica = await outDoc.embedFont(StandardFonts.Helvetica);
+  const fontResolver = new PdfFontResolver(outDoc, { StandardFonts });
 
   for (const edit of state.textEdits) {
     const page = outDoc.getPage(edit.pageNumber - 1);
+    const font = await fontResolver.resolveFontForEdit(edit);
     const pad = 1;
     const whiteoutWidth = Math.max(
       edit.width,
@@ -1686,7 +1670,7 @@ async function applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb }) {
       x: edit.baselineX ?? edit.x,
       y: edit.baselineY ?? edit.y,
       size: edit.fontSize,
-      font: helvetica,
+      font,
       color: rgb(0, 0, 0),
     });
   }
