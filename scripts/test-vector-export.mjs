@@ -704,6 +704,33 @@ async function testWhiteOutlineFillRecolor() {
   console.log("OK: white f* outline symbols recolor while white covers/backgrounds stay white");
 }
 
+async function testCurvedOutlineFillWithStaleFillColor() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 720,
+    pageHeight: 450,
+    pageArea: 720 * 450,
+  };
+
+  const stream = transformContentBytes(
+    new TextEncoder().encode(
+      "0.25 0.25 0.25 sc 503.9794 309.9631 m 504.2167 309.2863 l 502.8456 308.8351 501.8305 307.9548 501.1713 306.6452 c 500.5121 305.3356 500.1825 303.6906 500.1825 301.7101 c 500.1825 299.6594 500.5121 297.9689 501.1713 296.6389 c 501.8305 295.3088 502.8368 294.4181 504.1903 293.967 c 503.9794 293.2902 l 502.2626 293.7414 500.9471 294.7126 500.0331 296.2038 c 499.119 297.695 498.662 299.5012 498.662 301.6223 c 498.662 303.7375 499.1205 305.5436 500.0375 307.0407 c 500.9545 308.5378 502.2685 309.5119 503.9794 309.9631 c h f*\n",
+    ),
+    opts,
+  );
+  const text = new TextDecoder("latin1").decode(stream);
+  if (!text.includes(`${TARGET_RGB} rg f*`)) {
+    throw new Error(`Curved white outline f* was not recolored after fill changed: ${text}`);
+  }
+
+  console.log("OK: curved outline f* recolors even when active fill is no longer white");
+}
+
 async function testFormInheritedWhiteTextRecolor() {
   const formBytes = new TextEncoder().encode("BT /F1 12 Tf 10 20 Td (Hidden) Tj ET\n");
   const pageBytes = new TextEncoder().encode("1 1 1 rg /Fm0 Do\n");
@@ -972,6 +999,7 @@ async function main() {
   await testPathStrokeRecolorOnly();
   await testIccBasedRgbColorSpaceRecolor();
   await testWhiteOutlineFillRecolor();
+  await testCurvedOutlineFillWithStaleFillColor();
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
