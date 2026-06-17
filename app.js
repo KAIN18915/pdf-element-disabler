@@ -4,6 +4,7 @@ import * as pdfLib from "./pdf-lib-shim.js";
 import {
   makeCoverKey,
   needsContentStreamTransform,
+  shouldRecolorNearWhiteFillPath,
   shouldRecolorNearWhiteStroke,
   transformPdfContent,
 } from "./pdf-content-transform.js";
@@ -775,16 +776,16 @@ function instrumentContext(ctx, info) {
   };
 
   const isWhiteOutlineGlyph = (pdfBBox, cssBox, coverMeta = {}) => {
-    if (coverMeta.isAxisAlignedRect) {
-      return isThinWhiteBar(cssBox);
-    }
-    if (isThinWhiteBar(cssBox) || isLinearWhiteSymbol(cssBox)) {
-      return true;
+    if (coverMeta.isAxisAlignedRect || coverMeta.rectCount > 0) {
+      return false;
     }
     if (coverMeta.hasCurve) {
       return true;
     }
-    if (coverMeta.hasLine && isSmallWhiteContent(pdfBBox)) {
+    if (coverMeta.pathOps >= 6 && isLinearWhiteSymbol(cssBox)) {
+      return true;
+    }
+    if (coverMeta.hasLine && coverMeta.pathOps >= 6 && isSmallWhiteContent(pdfBBox)) {
       return true;
     }
     return false;
@@ -796,18 +797,48 @@ function instrumentContext(ctx, info) {
         isAxisAlignedRect: Boolean(pathArg.__pathMeta.isPureRect),
         hasCurve: Boolean(pathArg.__pathMeta.hasCurve),
         hasLine: Boolean(pathArg.__pathMeta.hasLine),
+        pathOps: pathArg.__pathMeta.opCount ?? 0,
+        rectCount: pathArg.__pathMeta.rectCount ?? 0,
       };
     }
     return {
       isAxisAlignedRect: isPureRectPath(),
       hasCurve: pathState.hasCurve,
       hasLine: pathState.hasLine,
+      pathOps: pathState.opCount,
+      rectCount: pathState.rectCount,
     };
   };
 
   const isPageBackgroundDevice = (device) => {
     const deviceArea = device.w * device.h;
     return canvasArea > 0 && deviceArea / canvasArea >= PAGE_BACKGROUND_AREA_RATIO;
+  };
+
+  const pageRecolorOptions = () => {
+    const pageWidth = info.viewport.width / info.viewport.scale;
+    const pageHeight = info.viewport.height / info.viewport.scale;
+    return {
+      pageArea: pageWidth * pageHeight,
+      pageWidth,
+      pageHeight,
+    };
+  };
+
+  const shouldRecolorWhiteFillPath = (pdfBBox, coverMeta) => {
+    if (!state.recolorText) {
+      return false;
+    }
+    return shouldRecolorNearWhiteFillPath(
+      {
+        bbox: pdfBBox,
+        pathOps: coverMeta.pathOps ?? 0,
+        rectCount: coverMeta.rectCount ?? 0,
+        hasCurve: Boolean(coverMeta.hasCurve),
+        isSimpleRectPath: Boolean(coverMeta.isAxisAlignedRect),
+      },
+      pageRecolorOptions(),
+    );
   };
 
   const handleCover = (userBox, drawOriginal, styleProp = "fillStyle", coverMeta = {}) => {
@@ -828,6 +859,11 @@ function instrumentContext(ctx, info) {
 
     if (isPageBackgroundDevice(device)) {
       drawOriginal();
+      return;
+    }
+
+    if (shouldRecolorWhiteFillPath(pdfBBox, coverMeta)) {
+      drawWithNearWhiteRecolor(styleProp, drawOriginal);
       return;
     }
 

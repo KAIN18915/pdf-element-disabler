@@ -460,6 +460,7 @@ function transformContentBytes(bytes, options) {
     options.pageHeight,
     options.inheritedGraphicsState ?? null,
   );
+  state.colorSpaceResolver = options.colorSpaceResolver ?? state.colorSpaceResolver;
 
   for (let index = 0; index < tokens.length; ) {
     const token = tokens[index];
