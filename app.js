@@ -1333,6 +1333,54 @@ async function mergePdfFile(file) {
   }
 }
 
+function applyPdfMatrix(matrix, x, y) {
+  return [
+    matrix[0] * x + matrix[2] * y + matrix[4],
+    matrix[1] * x + matrix[3] * y + matrix[5],
+  ];
+}
+
+function pdfPointsToBBox(points) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const [x, y] of points) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function getTextItemPdfBBox(item, style = {}) {
+  const transform = item.transform;
+  const fontSize = Math.hypot(transform[0], transform[1]);
+  const fontHeight = Math.hypot(transform[2], transform[3]) || item.height || fontSize;
+  const width = item.width || estimateTextWidth(item.str, fontSize);
+  const ascent = (style.ascent ?? 0.75) * fontHeight;
+  const descent = Math.abs(style.descent ?? 0.25) * fontHeight;
+
+  const textSpaceCorners = [
+    [0, -descent],
+    [width, -descent],
+    [0, ascent],
+    [width, ascent],
+  ];
+  const userSpacePoints = textSpaceCorners.map(([tx, ty]) => applyPdfMatrix(transform, tx, ty));
+  const bbox = pdfPointsToBBox(userSpacePoints);
+
+  return {
+    ...bbox,
+    baselineX: transform[4],
+    baselineY: transform[5],
+    fontSize,
+  };
+}
+
 async function getTextSpansForPage(page) {
   const textContent = await page.getTextContent();
   const spans = [];
@@ -1343,21 +1391,23 @@ async function getTextSpansForPage(page) {
       continue;
     }
 
-    const transform = item.transform;
-    const fontSize = Math.hypot(transform[0], transform[1]);
-    const x = transform[4];
-    const y = transform[5];
-    const width = item.width || estimateTextWidth(item.str, fontSize);
-    const height = item.height || fontSize * 1.2;
+    const style = textContent.styles[item.fontName] ?? {};
+    const metrics = getTextItemPdfBBox(item, style);
 
     spans.push({
       index,
       originalText: item.str,
-      x,
-      y,
-      width,
-      height,
-      fontSize,
+      x: metrics.baselineX,
+      y: metrics.baselineY,
+      bbox: {
+        x: metrics.x,
+        y: metrics.y,
+        w: metrics.w,
+        h: metrics.h,
+      },
+      width: metrics.w,
+      height: metrics.h,
+      fontSize: metrics.fontSize,
     });
   }
 
@@ -1373,8 +1423,8 @@ function findTextEditForSpan(pageNumber, span) {
     (edit) =>
       edit.pageNumber === pageNumber &&
       edit.originalText === span.originalText &&
-      Math.abs(edit.x - span.x) < 0.5 &&
-      Math.abs(edit.y - span.y) < 0.5,
+      Math.abs((edit.baselineX ?? edit.x) - span.x) < 0.5 &&
+      Math.abs((edit.baselineY ?? edit.y) - span.y) < 0.5,
   );
 }
 
@@ -1401,10 +1451,7 @@ async function paintTextEditHits(layer, page, pageNumber, viewport) {
   const fragment = document.createDocumentFragment();
 
   for (const span of spans) {
-    const cssBox = pdfBoxToCssBox(
-      { x: span.x, y: span.y, w: span.width, h: span.height },
-      viewport,
-    );
+    const cssBox = pdfBoxToCssBox(span.bbox, viewport);
     const existingEdit = findTextEditForSpan(pageNumber, span);
     const hit = document.createElement("button");
     hit.type = "button";
@@ -1464,10 +1511,12 @@ function saveTextEditFromDialog() {
   const edit = {
     id,
     pageNumber,
-    x: span.x,
-    y: span.y,
-    width: span.width,
-    height: span.height,
+    x: span.bbox.x,
+    y: span.bbox.y,
+    width: span.bbox.w,
+    height: span.bbox.h,
+    baselineX: span.x,
+    baselineY: span.y,
     fontSize: span.fontSize,
     newText,
     originalText: span.originalText,
@@ -1617,12 +1666,17 @@ async function drawUserEditsOnCanvas(context, pageNumber, viewport, outputScale)
 }
 
 function drawTextEditOnCanvas(context, edit, viewport) {
+  const pad = 1;
+  const whiteoutWidth = Math.max(
+    edit.width,
+    estimateTextWidth(edit.newText, edit.fontSize) + pad * 2,
+  );
   const cssBox = pdfBoxToCssBox(
     {
-      x: edit.x - 1,
-      y: edit.y - edit.fontSize * 0.15,
-      w: Math.max(edit.width, estimateTextWidth(edit.newText, edit.fontSize)) + 2,
-      h: edit.height + 2,
+      x: edit.x - pad,
+      y: edit.y - pad,
+      w: whiteoutWidth + pad,
+      h: edit.height + pad * 2,
     },
     viewport,
   );
@@ -1630,7 +1684,10 @@ function drawTextEditOnCanvas(context, edit, viewport) {
   context.fillStyle = "#ffffff";
   context.fillRect(cssBox.x, cssBox.y, cssBox.w, cssBox.h);
 
-  const baseline = viewport.convertToViewportPoint(edit.x, edit.y);
+  const baseline = viewport.convertToViewportPoint(
+    edit.baselineX ?? edit.x,
+    edit.baselineY ?? edit.y,
+  );
   const fontSizeCss = edit.fontSize * viewport.scale;
   context.fillStyle = "#000000";
   context.font = `${fontSizeCss}px Helvetica, Arial, sans-serif`;
@@ -1673,17 +1730,21 @@ async function applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb }) {
   for (const edit of state.textEdits) {
     const page = outDoc.getPage(edit.pageNumber - 1);
     const pad = 1;
+    const whiteoutWidth = Math.max(
+      edit.width,
+      estimateTextWidth(edit.newText, edit.fontSize) + pad * 2,
+    );
     page.drawRectangle({
       x: edit.x - pad,
-      y: edit.y - edit.fontSize * 0.2,
-      width: Math.max(edit.width, estimateTextWidth(edit.newText, edit.fontSize)) + pad * 2,
-      height: edit.height + pad,
+      y: edit.y - pad,
+      width: whiteoutWidth + pad,
+      height: edit.height + pad * 2,
       color: rgb(1, 1, 1),
       borderWidth: 0,
     });
     page.drawText(edit.newText, {
-      x: edit.x,
-      y: edit.y,
+      x: edit.baselineX ?? edit.x,
+      y: edit.baselineY ?? edit.y,
       size: edit.fontSize,
       font: helvetica,
       color: rgb(0, 0, 0),
