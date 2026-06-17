@@ -1356,19 +1356,29 @@ function pdfPointsToBBox(points) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+function getFontAscentRatio(style = {}) {
+  if (style.ascent != null) {
+    return style.ascent;
+  }
+  if (style.descent != null) {
+    return 1 + style.descent;
+  }
+  return 0.8;
+}
+
 function getTextItemPdfBBox(item, style = {}) {
   const transform = item.transform;
   const fontSize = Math.hypot(transform[0], transform[1]);
-  const fontHeight = Math.hypot(transform[2], transform[3]) || item.height || fontSize;
+  const fontHeight = Math.hypot(transform[2], transform[3]) || fontSize;
   const width = item.width || estimateTextWidth(item.str, fontSize);
-  const ascent = (style.ascent ?? 0.75) * fontHeight;
-  const descent = Math.abs(style.descent ?? 0.25) * fontHeight;
+  const fontAscent = fontHeight * getFontAscentRatio(style);
+  const fontDescent = fontHeight - fontAscent;
 
   const textSpaceCorners = [
-    [0, -descent],
-    [width, -descent],
-    [0, ascent],
-    [width, ascent],
+    [0, -fontDescent],
+    [width, -fontDescent],
+    [0, fontAscent],
+    [width, fontAscent],
   ];
   const userSpacePoints = textSpaceCorners.map(([tx, ty]) => applyPdfMatrix(transform, tx, ty));
   const bbox = pdfPointsToBBox(userSpacePoints);
@@ -1378,40 +1388,164 @@ function getTextItemPdfBBox(item, style = {}) {
     baselineX: transform[4],
     baselineY: transform[5],
     fontSize,
+    fontHeight,
   };
+}
+
+function getTransformAngle(transform) {
+  return Math.atan2(transform[1], transform[0]);
+}
+
+function getTextItemAdvanceEnd(item) {
+  const width = item.width || 0;
+  return applyPdfMatrix(item.transform, width, 0);
+}
+
+function mergePdfBBoxes(a, b) {
+  const x1 = Math.min(a.x, b.x);
+  const y1 = Math.min(a.y, b.y);
+  const x2 = Math.max(a.x + a.w, b.x + b.w);
+  const y2 = Math.max(a.y + a.h, b.y + b.h);
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+}
+
+function shouldMergeTextItems(previous, current) {
+  if (previous.item.hasEOL) {
+    return false;
+  }
+
+  const prevSize = Math.max(previous.metrics.fontSize, previous.metrics.fontHeight);
+  const currSize = Math.max(current.metrics.fontSize, current.metrics.fontHeight);
+  const lineTolerance = Math.max(prevSize, currSize) * 0.35;
+  if (Math.abs(previous.metrics.baselineY - current.metrics.baselineY) > lineTolerance) {
+    return false;
+  }
+
+  const angleDiff = Math.abs(previous.angle - current.angle);
+  if (angleDiff > 0.2 && Math.abs(angleDiff - Math.PI) > 0.2) {
+    return false;
+  }
+
+  const [prevEndX, prevEndY] = previous.advanceEnd;
+  const gap = Math.hypot(current.metrics.baselineX - prevEndX, current.metrics.baselineY - prevEndY);
+  const maxGap = Math.max(prevSize, currSize) * 1.5;
+  if (gap > maxGap) {
+    return false;
+  }
+
+  const mergedLength = previous.text.length + current.item.str.length;
+  if (mergedLength > 400) {
+    return false;
+  }
+
+  return true;
+}
+
+function mergeTextItemsIntoSpans(items) {
+  const spans = [];
+  let group = null;
+
+  const flushGroup = () => {
+    if (!group) {
+      return;
+    }
+
+    const trimmed = group.text.trim();
+    if (!trimmed) {
+      group = null;
+      return;
+    }
+
+    spans.push({
+      index: group.firstIndex,
+      itemIndices: group.itemIndices,
+      originalText: group.text,
+      x: group.baselineX,
+      y: group.baselineY,
+      bbox: group.bbox,
+      width: group.bbox.w,
+      height: group.bbox.h,
+      fontSize: group.fontSize,
+    });
+    group = null;
+  };
+
+  for (const entry of items) {
+    if (!group) {
+      group = {
+        firstIndex: entry.index,
+        itemIndices: [entry.index],
+        text: entry.item.str,
+        baselineX: entry.metrics.baselineX,
+        baselineY: entry.metrics.baselineY,
+        bbox: { ...entry.bbox },
+        fontSize: entry.metrics.fontSize,
+        angle: entry.angle,
+        advanceEnd: entry.advanceEnd,
+        item: entry.item,
+        metrics: entry.metrics,
+      };
+      continue;
+    }
+
+    if (shouldMergeTextItems(group, entry)) {
+      group.text += entry.item.str;
+      group.itemIndices.push(entry.index);
+      group.bbox = mergePdfBBoxes(group.bbox, entry.bbox);
+      group.advanceEnd = entry.advanceEnd;
+      group.item = entry.item;
+      continue;
+    }
+
+    flushGroup();
+    group = {
+      firstIndex: entry.index,
+      itemIndices: [entry.index],
+      text: entry.item.str,
+      baselineX: entry.metrics.baselineX,
+      baselineY: entry.metrics.baselineY,
+      bbox: { ...entry.bbox },
+      fontSize: entry.metrics.fontSize,
+      angle: entry.angle,
+      advanceEnd: entry.advanceEnd,
+      item: entry.item,
+      metrics: entry.metrics,
+    };
+  }
+
+  flushGroup();
+  return spans;
 }
 
 async function getTextSpansForPage(page) {
   const textContent = await page.getTextContent();
-  const spans = [];
+  const rawItems = [];
 
   for (let index = 0; index < textContent.items.length; index += 1) {
     const item = textContent.items[index];
-    if (!item.str || !item.str.trim()) {
+    if (!item.str) {
       continue;
     }
 
     const style = textContent.styles[item.fontName] ?? {};
     const metrics = getTextItemPdfBBox(item, style);
 
-    spans.push({
+    rawItems.push({
       index,
-      originalText: item.str,
-      x: metrics.baselineX,
-      y: metrics.baselineY,
+      item,
+      metrics,
+      angle: getTransformAngle(item.transform),
+      advanceEnd: getTextItemAdvanceEnd(item),
       bbox: {
         x: metrics.x,
         y: metrics.y,
         w: metrics.w,
         h: metrics.h,
       },
-      width: metrics.w,
-      height: metrics.h,
-      fontSize: metrics.fontSize,
     });
   }
 
-  return spans;
+  return mergeTextItemsIntoSpans(rawItems);
 }
 
 function estimateTextWidth(text, fontSize) {
