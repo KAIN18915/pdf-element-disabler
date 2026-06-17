@@ -85,8 +85,9 @@ const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
 const STROKE_WHITE_THRESHOLD_CAP = 220;
 const LINEAR_SYMBOL_ASPECT_RATIO = 6;
-const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k"]);
-const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K"]);
+const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
+const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
+const TEXT_SHOW_OPERATORS = new Set(["Tj", "TJ", "'", '"']);
 const STROKE_PAINT_OPERATORS = new Set(["S", "s"]);
 const FILL_PAINT_OPERATORS = new Set(["f", "F", "f*"]);
 const BOTH_PAINT_OPERATORS = new Set(["B", "B*", "b", "b*"]);
@@ -310,10 +311,6 @@ function transformContentBytes(bytes, options) {
         index += 1;
         continue;
       }
-      if (options.recolorText && tryPushRecoloredColorOperator(tokens, index, token, options, output, state)) {
-        index += 1;
-        continue;
-      }
       updateGraphicsState(tokens, index, state, token);
     }
 
@@ -332,6 +329,8 @@ function createGraphicsState(pageWidth, pageHeight) {
     stack: [],
     fillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
     strokeColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
+    fillColorSpace: "DeviceGray",
+    strokeColorSpace: "DeviceGray",
     lastRect: null,
   };
 }
@@ -411,11 +410,30 @@ function updateGraphicsState(tokens, index, state, token) {
     return;
   }
 
-  if (token === "gs" || token === "cs" || token === "CS" || token === "sc" || token === "scn" || token === "SC" || token === "SCN") {
-    state.fillColor = { kind: "unknown" };
+  if (token === "cs") {
+    state.fillColorSpace = normalizeColorSpaceName(tokens[index - 1]);
+    return;
   }
 
-  if (token === "gs" || token === "CS" || token === "SC" || token === "SCN") {
+  if (token === "CS") {
+    state.strokeColorSpace = normalizeColorSpaceName(tokens[index - 1]);
+    return;
+  }
+
+  if (token === "sc" || token === "scn") {
+    const colorInfo = readColorFromOperator(tokens, index, token, state.fillColorSpace);
+    state.fillColor = colorInfo.kind === "unknown" ? { kind: "unknown" } : colorInfo;
+    return;
+  }
+
+  if (token === "SC" || token === "SCN") {
+    const colorInfo = readColorFromOperator(tokens, index, token, state.strokeColorSpace);
+    state.strokeColor = colorInfo.kind === "unknown" ? { kind: "unknown" } : colorInfo;
+    return;
+  }
+
+  if (token === "gs") {
+    state.fillColor = { kind: "unknown" };
     state.strokeColor = { kind: "unknown" };
   }
 }
@@ -507,18 +525,151 @@ function shouldRemoveFill(bbox, fillColor, options) {
   return Boolean(options.revealedCovers?.has(key));
 }
 
+function createTextBlockState(outerState) {
+  return {
+    fillColor: cloneColorState(outerState.fillColor),
+    strokeColor: cloneColorState(outerState.strokeColor ?? { kind: "rgb", r: 0, g: 0, b: 0 }),
+    fillColorSpace: outerState.fillColorSpace ?? "DeviceGray",
+    strokeColorSpace: outerState.strokeColorSpace ?? "DeviceGray",
+    textRenderingMode: 0,
+  };
+}
+
 function recolorTextBlock(blockTokens, options, outerState) {
   const output = [];
+  const state = createTextBlockState(outerState);
 
-  for (let index = 0; index < blockTokens.length; index += 1) {
+  for (let index = 0; index < blockTokens.length; ) {
     const token = blockTokens[index];
-    if (tryPushRecoloredColorOperator(blockTokens, index, token, options, output, outerState, { allowFillRecolor: true })) {
+
+    if (FILL_COLOR_OPERATORS.has(token) || STROKE_COLOR_OPERATORS.has(token)) {
+      const result = processColorOperatorInBlock(blockTokens, index, token, state, options);
+      output.push(...result.output);
+      index = result.nextIndex;
       continue;
     }
+
+    if (token === "cs" || token === "CS") {
+      const colorSpace = normalizeColorSpaceName(blockTokens[index - 1]);
+      if (token === "cs") {
+        state.fillColorSpace = colorSpace;
+      } else {
+        state.strokeColorSpace = colorSpace;
+      }
+      output.push(blockTokens[index - 1], token);
+      index += 1;
+      continue;
+    }
+
+    if (token === "Tr") {
+      state.textRenderingMode = Number(blockTokens[index - 1]);
+      output.push(blockTokens[index - 1], token);
+      index += 1;
+      continue;
+    }
+
+    if (TEXT_SHOW_OPERATORS.has(token)) {
+      injectRecoloredTextPaint(output, state, options);
+      index = emitTextShowOperator(blockTokens, index, token, output);
+      continue;
+    }
+
     output.push(token);
+    index += 1;
   }
 
   return output;
+}
+
+function processColorOperatorInBlock(tokens, operatorIndex, token, state, options) {
+  const isStroke = STROKE_COLOR_OPERATORS.has(token);
+  const colorSpace = isStroke ? state.strokeColorSpace : state.fillColorSpace;
+  const colorInfo = readColorFromOperator(tokens, operatorIndex, token, colorSpace);
+  const argCount = colorInfo.argCount ?? 0;
+  const startIndex = operatorIndex - argCount;
+  const threshold = isStroke ? getStrokeThreshold(options) : getFillThreshold(options);
+
+  if (
+    colorInfo.kind !== "unknown"
+    && isNearWhite(colorInfo.r, colorInfo.g, colorInfo.b, threshold)
+  ) {
+    const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+    const outOp = isStroke ? "RG" : "rg";
+    const recolored = { kind: "rgb", r: target[0], g: target[1], b: target[2] };
+    if (isStroke) {
+      state.strokeColor = recolored;
+    } else {
+      state.fillColor = recolored;
+    }
+    return {
+      output: [
+        formatNumber(target[0]),
+        formatNumber(target[1]),
+        formatNumber(target[2]),
+        outOp,
+      ],
+      nextIndex: operatorIndex + 1,
+    };
+  }
+
+  const output = tokens.slice(startIndex, operatorIndex + 1);
+  if (colorInfo.kind !== "unknown") {
+    if (isStroke) {
+      state.strokeColor = colorInfo;
+    } else {
+      state.fillColor = colorInfo;
+    }
+  } else if (isStroke) {
+    state.strokeColor = { kind: "unknown" };
+  } else {
+    state.fillColor = { kind: "unknown" };
+  }
+
+  return {
+    output,
+    nextIndex: operatorIndex + 1,
+  };
+}
+
+function injectRecoloredTextPaint(output, state, options) {
+  const mode = state.textRenderingMode ?? 0;
+  const usesFill = mode === 0 || mode === 2 || mode === 4 || mode === 6;
+  const usesStroke = mode === 1 || mode === 2 || mode === 5 || mode === 6;
+
+  if (usesFill && shouldRecolorTextPaint(state.fillColor, getFillThreshold(options))) {
+    pushTargetColor(output, options, "rg");
+    state.fillColor = targetColorFromOptions(options);
+    return;
+  }
+
+  if (usesStroke && shouldRecolorTextPaint(state.strokeColor, getStrokeThreshold(options))) {
+    pushTargetColor(output, options, "RG");
+    state.strokeColor = targetColorFromOptions(options);
+  }
+}
+
+function shouldRecolorTextPaint(color, threshold) {
+  return isNearWhiteColor(color, threshold);
+}
+
+function targetColorFromOptions(options) {
+  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+  return { kind: "rgb", r: target[0], g: target[1], b: target[2] };
+}
+
+function emitTextShowOperator(tokens, operatorIndex, token, output) {
+  if (token === "Tj" || token === "TJ" || token === "'") {
+    output.push(tokens[operatorIndex - 1], token);
+    return operatorIndex + 1;
+  }
+
+  if (token === '"') {
+    output.push(tokens[operatorIndex - 3], tokens[operatorIndex - 2], tokens[operatorIndex - 1], token);
+    return operatorIndex + 1;
+  }
+
+  output.push(token);
+  return operatorIndex + 1;
 }
 
 function getFillThreshold(options) {
@@ -627,47 +778,58 @@ function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, option
   return true;
 }
 
-function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, output, state = null, recolorOptions = {}) {
-  const allowFillRecolor = recolorOptions.allowFillRecolor ?? false;
+function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, output, state = null) {
   if (!FILL_COLOR_OPERATORS.has(token) && !STROKE_COLOR_OPERATORS.has(token)) {
     return false;
   }
 
-  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
-  const isStroke = STROKE_COLOR_OPERATORS.has(token);
-  if (!isStroke && !allowFillRecolor) {
+  const blockState = createTextBlockState(state ?? createGraphicsState(0, 0));
+  const result = processColorOperatorInBlock(tokens, operatorIndex, token, blockState, options);
+  const colorInfo = readColorFromOperator(
+    tokens,
+    operatorIndex,
+    token,
+    STROKE_COLOR_OPERATORS.has(token) ? blockState.strokeColorSpace : blockState.fillColorSpace,
+  );
+  const original = tokens.slice(operatorIndex - (colorInfo.argCount ?? 0), operatorIndex + 1);
+  if (result.output.join(" ") === original.join(" ")) {
     return false;
   }
-  const threshold = isStroke ? getStrokeThreshold(options) : getFillThreshold(options);
 
+  output.push(...result.output);
+  if (state) {
+    if (STROKE_COLOR_OPERATORS.has(token)) {
+      state.strokeColor = blockState.strokeColor;
+    } else {
+      state.fillColor = blockState.fillColor;
+    }
+  }
+  return true;
+}
+
+function normalizeColorSpaceName(name) {
+  const normalized = String(name ?? "DeviceGray").replace(/^\//, "");
+  if (normalized === "DeviceRGB" || normalized === "RGB") {
+    return "DeviceRGB";
+  }
+  if (normalized === "DeviceCMYK" || normalized === "CMYK") {
+    return "DeviceCMYK";
+  }
+  if (normalized === "DeviceGray" || normalized === "G") {
+    return "DeviceGray";
+  }
+  return "unknown";
+}
+
+function readColorFromOperator(tokens, operatorIndex, token, colorSpace) {
   if (token === "rg" || token === "RG") {
     const args = readNumberArgs(tokens, operatorIndex, 3);
-    if (!isNearWhite(args[0], args[1], args[2], threshold)) {
-      return false;
-    }
-    const outOp = isStroke ? "RG" : "rg";
-    output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), outOp);
-    if (state) {
-      applyRecoloredColorToState(state, token, options);
-    }
-    return true;
+    return { kind: "rgb", r: args[0], g: args[1], b: args[2], argCount: 3 };
   }
 
   if (token === "g" || token === "G") {
     const gray = readNumberArgs(tokens, operatorIndex, 1)[0];
-    if (!isNearWhite(gray, gray, gray, threshold)) {
-      return false;
-    }
-    output.push(
-      formatNumber(target[0]),
-      formatNumber(target[1]),
-      formatNumber(target[2]),
-      isStroke ? "RG" : "rg",
-    );
-    if (state) {
-      applyRecoloredColorToState(state, token, options);
-    }
-    return true;
+    return { kind: "gray", gray, r: gray, g: gray, b: gray, argCount: 1 };
   }
 
   if (token === "k" || token === "K") {
@@ -676,22 +838,89 @@ function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, ou
     const r = (1 - c) * (1 - kVal);
     const g = (1 - m) * (1 - kVal);
     const b = (1 - y) * (1 - kVal);
-    if (!isNearWhite(r, g, b, threshold)) {
-      return false;
-    }
-    output.push(
-      formatNumber(target[0]),
-      formatNumber(target[1]),
-      formatNumber(target[2]),
-      isStroke ? "RG" : "rg",
-    );
-    if (state) {
-      applyRecoloredColorToState(state, token, options);
-    }
-    return true;
+    return { kind: "cmyk", c, m, y, k: kVal, r, g, b, argCount: 4 };
   }
 
-  return false;
+  if (token === "sc" || token === "SC") {
+    return readScColor(tokens, operatorIndex, colorSpace);
+  }
+
+  if (token === "scn" || token === "SCN") {
+    return readScnColor(tokens, operatorIndex, colorSpace);
+  }
+
+  return { kind: "unknown", argCount: 0 };
+}
+
+function readScColor(tokens, operatorIndex, colorSpace) {
+  const resolvedSpace = colorSpace === "unknown" ? "DeviceGray" : colorSpace;
+  if (resolvedSpace === "DeviceRGB") {
+    const args = readNumberArgs(tokens, operatorIndex, 3);
+    return { kind: "rgb", r: args[0], g: args[1], b: args[2], argCount: 3 };
+  }
+  if (resolvedSpace === "DeviceCMYK") {
+    const args = readNumberArgs(tokens, operatorIndex, 4);
+    const [c, m, y, kVal] = args;
+    const r = (1 - c) * (1 - kVal);
+    const g = (1 - m) * (1 - kVal);
+    const b = (1 - y) * (1 - kVal);
+    return { kind: "cmyk", c, m, y, k: kVal, r, g, b, argCount: 4 };
+  }
+  const gray = readNumberArgs(tokens, operatorIndex, 1)[0];
+  return { kind: "gray", gray, r: gray, g: gray, b: gray, argCount: 1 };
+}
+
+function readScnColor(tokens, operatorIndex, colorSpace) {
+  const numericCount = countNumericArgsBeforeOperator(tokens, operatorIndex);
+  let resolvedSpace = colorSpace;
+  let argCount = 0;
+
+  if (resolvedSpace === "DeviceRGB") {
+    argCount = 3;
+  } else if (resolvedSpace === "DeviceCMYK") {
+    argCount = 4;
+  } else if (resolvedSpace === "DeviceGray") {
+    argCount = 1;
+  } else if (numericCount === 1 || numericCount === 3 || numericCount === 4) {
+    argCount = numericCount;
+    if (argCount === 1) {
+      resolvedSpace = "DeviceGray";
+    } else if (argCount === 3) {
+      resolvedSpace = "DeviceRGB";
+    } else {
+      resolvedSpace = "DeviceCMYK";
+    }
+  } else {
+    return { kind: "unknown", argCount: 0 };
+  }
+
+  if (numericCount !== argCount) {
+    return { kind: "unknown", argCount: 0 };
+  }
+
+  return readScColor(tokens, operatorIndex, resolvedSpace);
+}
+
+function countNumericArgsBeforeOperator(tokens, operatorIndex) {
+  let count = 0;
+  for (let index = operatorIndex - 1; index >= 0; index -= 1) {
+    if (!isNumericToken(tokens[index])) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function isNumericToken(token) {
+  if (typeof token !== "string") {
+    return false;
+  }
+  return Number.isFinite(Number(token));
+}
+
+function cloneColorState(color) {
+  return color ? { ...color } : { kind: "unknown" };
 }
 
 function tokenizeContentStream(bytes) {
@@ -995,8 +1224,10 @@ function cloneGraphicsState(state) {
     pageHeight: state.pageHeight,
     ctm: { ...state.ctm },
     stack: [],
-    fillColor: { ...state.fillColor },
-    strokeColor: { ...state.strokeColor },
+    fillColor: cloneColorState(state.fillColor),
+    strokeColor: cloneColorState(state.strokeColor),
+    fillColorSpace: state.fillColorSpace,
+    strokeColorSpace: state.strokeColorSpace,
     lastRect: state.lastRect ? { ...state.lastRect } : null,
   };
 }
@@ -1005,6 +1236,8 @@ function restoreGraphicsState(state, saved) {
   state.ctm = saved.ctm;
   state.fillColor = saved.fillColor;
   state.strokeColor = saved.strokeColor;
+  state.fillColorSpace = saved.fillColorSpace;
+  state.strokeColorSpace = saved.strokeColorSpace;
   state.lastRect = saved.lastRect;
 }
 

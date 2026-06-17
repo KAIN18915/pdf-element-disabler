@@ -336,6 +336,53 @@ async function testRecolorOperators() {
   console.log("OK: stroke/fill color operators recolored without duplicate operands");
 }
 
+async function testRedHighlightWhiteText() {
+  const opts = {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const cases = [
+    {
+      label: "white rg inside BT on red rect",
+      source: "100 600 200 40 re 0.9 0.1 0.1 rg f BT 1 1 1 rg /F1 12 Tf 110 615 Td (Hi) Tj ET\n",
+      mustInclude: "0.867 0.067 0.2 rg",
+      mustNotInclude: "1 1 1 rg",
+    },
+    {
+      label: "white color inherited from q block before BT",
+      source: "100 600 200 40 re 0.9 0.1 0.1 rg f q 1 1 1 rg BT /F1 12 Tf 110 615 Td (Hi) Tj ET Q\n",
+      mustInclude: "0.867 0.067 0.2 rg",
+      mustNotInclude: null,
+    },
+    {
+      label: "DeviceGray sc white text",
+      source: "100 600 200 40 re 0.9 0.1 0.1 rg f q BT 1 sc /F1 12 Tf 110 615 Td (Hi) Tj ET Q\n",
+      mustInclude: "0.867 0.067 0.2 rg",
+      mustNotInclude: "1 sc",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const transformed = transformContentBytes(new TextEncoder().encode(testCase.source), opts);
+    const text = new TextDecoder("latin1").decode(transformed);
+    if (!text.includes(testCase.mustInclude)) {
+      throw new Error(`${testCase.label}: expected ${testCase.mustInclude} in ${text}`);
+    }
+    if (testCase.mustNotInclude && text.includes(testCase.mustNotInclude)) {
+      throw new Error(`${testCase.label}: still contains ${testCase.mustNotInclude}: ${text}`);
+    }
+  }
+
+  console.log("OK: red highlight + white text streams recolored for visibility");
+}
+
 async function testPathStrokeAndThinFillRecolor() {
   const baseOptions = {
     whiteThreshold: 238,
@@ -354,11 +401,8 @@ async function testPathStrokeAndThinFillRecolor() {
     baseOptions,
   );
   const strokeText = new TextDecoder("latin1").decode(strokeStream);
-  if (!strokeText.includes(`${TARGET_RGB} RG`)) {
-    throw new Error(`Expected near-white path stroke to be recolored: ${strokeText}`);
-  }
-  if (strokeText.includes("0.92 G")) {
-    throw new Error(`Near-white G operator should be rewritten: ${strokeText}`);
+  if (!strokeText.includes(`${TARGET_RGB} RG S`)) {
+    throw new Error(`Expected near-white path stroke to be recolored before S: ${strokeText}`);
   }
 
   const bracketStream = transformContentBytes(
@@ -366,8 +410,8 @@ async function testPathStrokeAndThinFillRecolor() {
     baseOptions,
   );
   const bracketText = new TextDecoder("latin1").decode(bracketStream);
-  if (!bracketText.includes(`${TARGET_RGB} RG`)) {
-    throw new Error(`Expected white bracket stroke to be recolored: ${bracketText}`);
+  if (!bracketText.includes(`${TARGET_RGB} RG S`)) {
+    throw new Error(`Expected white bracket stroke to be recolored before S: ${bracketText}`);
   }
 
   const fractionStream = transformContentBytes(
@@ -375,8 +419,8 @@ async function testPathStrokeAndThinFillRecolor() {
     baseOptions,
   );
   const fractionText = new TextDecoder("latin1").decode(fractionStream);
-  if (!fractionText.includes(`${TARGET_RGB} rg`)) {
-    throw new Error(`Expected thin white fraction bar fill to be recolored: ${fractionText}`);
+  if (!fractionText.includes(`${TARGET_RGB} rg f`)) {
+    throw new Error(`Expected thin white fraction bar fill to be recolored before f: ${fractionText}`);
   }
 
   const coverStream = transformContentBytes(
@@ -393,6 +437,7 @@ async function testPathStrokeAndThinFillRecolor() {
 
 async function main() {
   await testRecolorOperators();
+  await testRedHighlightWhiteText();
   await testPathStrokeAndThinFillRecolor();
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
