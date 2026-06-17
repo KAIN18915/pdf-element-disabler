@@ -419,8 +419,26 @@ async function testPathStrokeRecolorOnly() {
     baseOptions,
   );
   const thickStrokeText = new TextDecoder("latin1").decode(thickStrokeStream);
-  if (thickStrokeText.includes(`${TARGET_RGB} RG`)) {
-    throw new Error(`Thick white stroke should not be recolored: ${thickStrokeText}`);
+  if (!thickStrokeText.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Thick white bracket stroke should be recolored: ${thickStrokeText}`);
+  }
+
+  const thickBorderStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 RG 3 w 0 0 m 200 0 l 400 0 l S\n"),
+    baseOptions,
+  );
+  const thickBorderText = new TextDecoder("latin1").decode(thickBorderStream);
+  if (thickBorderText.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Wide horizontal border stroke should not be recolored: ${thickBorderText}`);
+  }
+
+  const longThinFillStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 0 100 612 2 re f\n"),
+    baseOptions,
+  );
+  const longThinFillText = new TextDecoder("latin1").decode(longThinFillStream);
+  if (longThinFillText.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`Long thin white fill bar must not be recolored: ${longThinFillText}`);
   }
 
   const fractionStream = transformContentBytes(
@@ -453,7 +471,7 @@ async function testPathStrokeRecolorOnly() {
     throw new Error(`Full-page white background fill was altered: ${pageBackgroundText}`);
   }
 
-  console.log("OK: thin path strokes recolored; fills and page background preserved");
+  console.log("OK: bracket and thin path strokes recolored; fills and page background preserved");
 }
 
 async function testFormInheritedWhiteTextRecolor() {
@@ -638,6 +656,50 @@ async function testBracketStrokeRecolor() {
   console.log("OK: matrix bracket strokes recolored before S");
 }
 
+async function testStrokeTextRecolor() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const strokeTextStream = transformContentBytes(
+    new TextEncoder().encode("BT 1 Tr 1 1 1 RG /F1 12 Tf 72 720 Td (Hi) Tj ET\n"),
+    opts,
+  );
+  const strokeText = new TextDecoder("latin1").decode(strokeTextStream);
+  const tjIndex = strokeText.indexOf("Tj");
+  if (tjIndex === -1) {
+    throw new Error(`Expected Tj in stroke text stream: ${strokeText}`);
+  }
+  const beforeTj = strokeText.slice(0, tjIndex);
+  if (!beforeTj.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Stroke-only white text was not recolored before Tj: ${strokeText}`);
+  }
+  if (beforeTj.includes("1 1 1 RG")) {
+    throw new Error(`Stroke-only white text still has near-white RG before Tj: ${strokeText}`);
+  }
+
+  const dualModeStream = transformContentBytes(
+    new TextEncoder().encode("BT 2 Tr 1 1 1 rg 1 1 1 RG /F1 12 Tf 72 700 Td (Hi) Tj ET\n"),
+    opts,
+  );
+  const dualModeText = new TextDecoder("latin1").decode(dualModeStream);
+  const dualTjIndex = dualModeText.indexOf("Tj");
+  const dualBeforeTj = dualModeText.slice(0, dualTjIndex);
+  if (!dualBeforeTj.includes(`${TARGET_RGB} rg`) || !dualBeforeTj.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Fill+stroke white text missing both recolors before Tj: ${dualModeText}`);
+  }
+
+  console.log("OK: stroke and fill+stroke white text recolored before Tj");
+}
+
 async function testRecolorOnlyTransformRuns() {
   const sampleBytes = await makeSamplePdf();
   const beforeDoc = await PDFDocument.load(sampleBytes.slice());
@@ -681,6 +743,7 @@ async function main() {
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
+  await testStrokeTextRecolor();
   await testFormInheritedWhiteTextRecolor();
   await testFormInheritedWhiteStrokeRecolor();
   await testRecolorOnlyTransformRuns();
