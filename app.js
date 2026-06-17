@@ -512,7 +512,7 @@ async function downloadModifiedPdfVector() {
     triggerDownload(bytes, buildVectorDownloadName(pdfName));
     setStatus(`${pdfName} の編集済みPDF（ベクター）をダウンロードしました。`);
   } catch (error) {
-    console.error(error);
+    console.error("Vector PDF export failed:", error?.message ?? error, error);
     setStatus(
       "ベクターPDFの作成に失敗しました。画像で保存を試すか、別のPDFで再試行してください。",
       "error",
