@@ -1,3 +1,13 @@
+export function extractSpanFontFields(style = {}, item = {}) {
+  return {
+    fontName: item.fontName ?? null,
+    fontFamily: style.fontFamily ?? null,
+    fontSubstitution: style.fontSubstitution ?? null,
+    fontSubstitutionLoadedName: style.fontSubstitutionLoadedName ?? null,
+    fontVertical: Boolean(style.vertical),
+  };
+}
+
 export function applyPdfMatrix(matrix, x, y) {
   return [
     matrix[0] * x + matrix[2] * y + matrix[4],
@@ -45,7 +55,20 @@ export function getFontAscentRatio(style = {}) {
   if (style.descent != null) {
     return 1 + style.descent;
   }
-  return 0.8;
+  return 0.75;
+}
+
+export function getTextSpaceDescent(style = {}, ascentRatio = getFontAscentRatio(style)) {
+  if (style.descent != null) {
+    return Math.abs(style.descent);
+  }
+  return Math.min(1 - ascentRatio, 0.22);
+}
+
+function getTightTextSpaceWidth(item) {
+  const textSpaceWidth = getTextSpaceWidth(item);
+  const trailingTrim = Math.min(textSpaceWidth * 0.04, 0.08);
+  return Math.max(textSpaceWidth - trailingTrim, textSpaceWidth * 0.5);
 }
 
 export function getTextItemPdfBBox(item, style = {}) {
@@ -54,8 +77,8 @@ export function getTextItemPdfBBox(item, style = {}) {
   const vScale = Math.hypot(tx[2], tx[3]) || hScale || 1;
   const ascentRatio = getFontAscentRatio(style);
   const textSpaceAscent = ascentRatio;
-  const textSpaceDescent = 1 - ascentRatio;
-  const textSpaceWidth = getTextSpaceWidth(item);
+  const textSpaceDescent = getTextSpaceDescent(style, ascentRatio);
+  const textSpaceWidth = getTightTextSpaceWidth(item);
 
   const corners = [
     [0, -textSpaceDescent],
@@ -158,6 +181,19 @@ function clusterItemsIntoLines(items) {
   return lines;
 }
 
+const INLINE_PUNCTUATION = /[,;:.!?、，；：。．！？]/;
+
+function isInlineContinuationGap(previous, current) {
+  const prevText = previous.text ?? "";
+  const nextText = current.item.str;
+  return (
+    /\s$/.test(prevText) ||
+    /^\s/.test(nextText) ||
+    INLINE_PUNCTUATION.test(nextText.charAt(0)) ||
+    INLINE_PUNCTUATION.test(prevText.charAt(prevText.length - 1))
+  );
+}
+
 export function shouldMergeTextItems(previous, current, lineContext = null) {
   if (previous.item.hasEOL) {
     return false;
@@ -178,34 +214,7 @@ export function shouldMergeTextItems(previous, current, lineContext = null) {
     return false;
   }
 
-  let maxVerticalGap = lineSize * 0.7;
-  if (horizontalGap <= lineSize * 0.5) {
-    maxVerticalGap = lineSize * 1.05;
-  }
-  if (verticalGap > maxVerticalGap) {
-    return false;
-  }
-
-  let maxGap = lineSize * 2.5;
-  if (horizontalGap <= lineSize * 0.25) {
-    maxGap = lineSize * 3.5;
-  }
-
-  const endsWithSentenceBreak = /[.!?。．！？]\s*$/.test(previous.text);
-  if (endsWithSentenceBreak && horizontalGap > lineSize * 0.8) {
-    return false;
-  }
-
-  const gap = Math.hypot(dx, dy);
-  if (horizontalGap > lineSize * 1.8 && verticalGap <= lineSize * 0.2) {
-    if (horizontalGap > maxGap) {
-      return false;
-    }
-  } else if (gap > maxGap) {
-    return false;
-  }
-
-  if (horizontalGap > lineSize * 5) {
+  if (verticalGap > lineSize * 0.7) {
     return false;
   }
 
@@ -214,7 +223,16 @@ export function shouldMergeTextItems(previous, current, lineContext = null) {
     return false;
   }
 
-  return true;
+  const columnGap = lineSize * 3;
+  if (horizontalGap > columnGap) {
+    return false;
+  }
+
+  if (isInlineContinuationGap(previous, current)) {
+    return true;
+  }
+
+  return horizontalGap <= lineSize * 2.5;
 }
 
 function unionEntryBBoxes(entries) {
@@ -233,23 +251,17 @@ function finalizeSpanBBox(group) {
     return entries.length === 1 ? entries[0].bbox : unionEntryBBoxes(entries);
   }
 
-  const fontHeight = median(entries.map((entry) => entry.metrics.fontHeight));
   const ascentRatio = getFontAscentRatio(group.style ?? {});
   const textSpaceAscent = ascentRatio;
-  const textSpaceDescent = 1 - ascentRatio;
+  const textSpaceDescent = getTextSpaceDescent(group.style ?? {}, ascentRatio);
 
   const anchor = entries.reduce((leftmost, entry) =>
     entry.metrics.baselineX <= leftmost.metrics.baselineX ? entry : leftmost,
   );
 
-  let minX = Infinity;
-  let maxX = -Infinity;
-  for (const entry of entries) {
-    minX = Math.min(minX, entry.bbox.x, entry.metrics.baselineX);
-    maxX = Math.max(maxX, entry.bbox.x + entry.bbox.w);
-  }
-  const [endX] = group.advanceEnd;
-  maxX = Math.max(maxX, endX);
+  const unionBBox = unionEntryBBoxes(entries);
+  let minX = unionBBox.x;
+  let maxX = unionBBox.x + unionBBox.w;
 
   const anchorTx = anchor.item.transform;
   const hScale = getHorizontalScale(anchorTx);
@@ -283,6 +295,7 @@ function mergeLineItemsIntoSpans(lineItems, lineContext) {
       return;
     }
 
+    const fontFields = extractSpanFontFields(group.style ?? {}, group.item ?? {});
     spans.push({
       index: group.firstIndex,
       itemIndices: group.itemIndices,
@@ -293,6 +306,7 @@ function mergeLineItemsIntoSpans(lineItems, lineContext) {
       width: 0,
       height: 0,
       fontSize: group.fontSize,
+      ...fontFields,
     });
     const last = spans[spans.length - 1];
     last.width = last.bbox.w;
