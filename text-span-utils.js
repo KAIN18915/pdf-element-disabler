@@ -55,14 +55,14 @@ export function getFontAscentRatio(style = {}) {
   if (style.descent != null) {
     return 1 + style.descent;
   }
-  return 0.8;
+  return 0.75;
 }
 
 export function getTextSpaceDescent(style = {}, ascentRatio = getFontAscentRatio(style)) {
   if (style.descent != null) {
     return Math.abs(style.descent);
   }
-  return 1 - ascentRatio;
+  return Math.min(1 - ascentRatio, 0.18);
 }
 
 export function multiplyPdfMatrices(a, b) {
