@@ -2,6 +2,7 @@ import "./path2d-tracker.js";
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
 import * as pdfLib from "./pdf-lib-shim.js";
 import {
+  isPageBackgroundBbox,
   makeCoverKey,
   needsContentStreamTransform,
   shouldRecolorNearWhiteFillPath,
@@ -330,22 +331,30 @@ async function renderDocument() {
   els.emptyState.hidden = true;
   setStatus(`${state.pdfName} を解析しています...`);
 
-  for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
-    if (token !== state.renderToken) {
-      return;
+  try {
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+      if (token !== state.renderToken) {
+        return;
+      }
+      const shell = await buildPageShell(pageNumber, token);
+      if (token !== state.renderToken || !shell) {
+        return;
+      }
+      els.viewer.append(shell);
     }
-    const shell = await buildPageShell(pageNumber, token);
-    if (token !== state.renderToken || !shell) {
-      return;
-    }
-    els.viewer.append(shell);
-  }
 
-  if (token === state.renderToken) {
-    setStatus(
-      `${state.pdfName}: ${pdfDoc.numPages}ページ / 白い被せ物 ${state.totalCovers} 個を検出`,
-    );
-    updateControls();
+    if (token === state.renderToken) {
+      setStatus(
+        `${state.pdfName}: ${pdfDoc.numPages}ページ / 白い被せ物 ${state.totalCovers} 個を検出`,
+      );
+      updateControls();
+    }
+  } catch (error) {
+    console.error(error);
+    if (token === state.renderToken) {
+      setStatus(`${state.pdfName} のプレビュー生成に失敗しました。`, "error");
+      updateControls();
+    }
   }
 }
 
@@ -857,7 +866,8 @@ function instrumentContext(ctx, info) {
     const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
     const cssBox = cssBoxFromDevice(device);
 
-    if (isPageBackgroundDevice(device)) {
+    const pageOptions = pageRecolorOptions();
+    if (isPageBackgroundDevice(device) || isPageBackgroundBbox(pdfBBox, pageOptions)) {
       drawOriginal();
       return;
     }
@@ -868,7 +878,11 @@ function instrumentContext(ctx, info) {
     }
 
     if (isWhiteOutlineGlyph(pdfBBox, cssBox, coverMeta)) {
-      drawOriginal();
+      if (state.recolorText) {
+        drawWithNearWhiteRecolor(styleProp, drawOriginal);
+      } else {
+        drawOriginal();
+      }
       return;
     }
 

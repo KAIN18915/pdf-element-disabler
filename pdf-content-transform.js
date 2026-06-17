@@ -1184,11 +1184,18 @@ export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
 }
 
 function shouldRecolorFillAtPaint(state, options) {
-  if (!isNearWhiteColor(state.fillColor, getFillThreshold(options))) {
+  const pathInfo = getPaintPathInfo(state);
+  if (!shouldRecolorNearWhiteFillPath(pathInfo, options)) {
     return false;
   }
 
-  return shouldRecolorNearWhiteFillPath(getPaintPathInfo(state), options);
+  if (isNearWhiteColor(state.fillColor, getFillThreshold(options))) {
+    return true;
+  }
+
+  // Curved outline symbols (matrix brackets, etc.) are drawn white in the
+  // source PDF but unrelated operators may change the active fill before f/f*.
+  return Boolean(pathInfo.hasCurve && pathInfo.pathOps >= 3);
 }
 
 function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
@@ -1286,7 +1293,7 @@ function clearPathState(state) {
   state.hasCurve = false;
 }
 
-function isPageBackgroundBbox(bbox, options) {
+export function isPageBackgroundBbox(bbox, options) {
   if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
     return false;
   }
