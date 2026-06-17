@@ -5,7 +5,7 @@ import {
   PDFRawStream,
   PDFRef,
   decodePDFRawStream,
-} from "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
+} from "./pdf-lib-shim.js";
 
 const OPERATORS = new Set([
   "b",
@@ -144,7 +144,7 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
     }
 
     const xObject = context.lookup(ref);
-    const subtype = xObject?.dict?.lookup(PDFName.of("Subtype"));
+    const subtype = xObject?.dict?.get(PDFName.of("Subtype"));
     if (subtype?.toString() !== "/Form") {
       continue;
     }
@@ -216,8 +216,16 @@ async function transformContentRefs(refs, context, options) {
   }
 }
 
+function readStreamFilter(stream, context) {
+  const filterEntry = stream.dict.get(PDFName.of("Filter"));
+  if (!filterEntry) {
+    return undefined;
+  }
+  return filterEntry instanceof PDFRef ? context.lookup(filterEntry) : filterEntry;
+}
+
 function replaceStreamContents(context, ref, bytes, originalStream) {
-  const filter = originalStream.dict.lookup(PDFName.of("Filter"));
+  const filter = readStreamFilter(originalStream, context);
   const newStream = hasFlateFilter(filter)
     ? context.flateStream(bytes)
     : context.stream(bytes);
