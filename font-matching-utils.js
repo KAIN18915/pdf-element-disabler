@@ -6,7 +6,27 @@ const CJK_TEXT_PATTERN =
 
 const embeddedFontBytesCache = new Map();
 const embeddedPdfFontCache = new Map();
+const embeddedFontsIndexCache = new WeakMap();
+const embeddedFontsIndexBytesCache = new Map();
+const canvasFontFaceCache = new Map();
 let cjkFallbackFontPromise = null;
+
+function getDocumentCacheKey(outDoc) {
+  return outDoc?.context?.trailerInfo?.ID?.[0]?.asString?.() ?? outDoc;
+}
+
+function getPdfBytesCacheKey(pdfBytes) {
+  if (!pdfBytes?.length) {
+    return "empty";
+  }
+  const sampleLength = Math.min(pdfBytes.length, 64);
+  let hash = 2166136261;
+  for (let index = 0; index < sampleLength; index += 1) {
+    hash ^= pdfBytes[index];
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${pdfBytes.length}:${hash >>> 0}`;
+}
 
 export function containsCjkText(text) {
   return CJK_TEXT_PATTERN.test(text);
@@ -186,13 +206,93 @@ async function getCjkFallbackFontBytes() {
 }
 
 async function embedBytesFont(outDoc, cacheKey, bytes) {
-  if (embeddedPdfFontCache.has(cacheKey)) {
-    return embeddedPdfFontCache.get(cacheKey);
+  const docKey = getDocumentCacheKey(outDoc);
+  const scopedKey = `${docKey}:${cacheKey}`;
+  if (embeddedPdfFontCache.has(scopedKey)) {
+    return embeddedPdfFontCache.get(scopedKey);
   }
 
   const font = await outDoc.embedFont(bytes, { subset: true });
-  embeddedPdfFontCache.set(cacheKey, font);
+  embeddedPdfFontCache.set(scopedKey, font);
   return font;
+}
+
+export function getEmbeddedFontsIndex(outDoc, indexEmbeddedPdfFonts) {
+  if (!outDoc || !indexEmbeddedPdfFonts) {
+    return new Map();
+  }
+
+  let indexed = embeddedFontsIndexCache.get(outDoc);
+  if (!indexed) {
+    indexed = indexEmbeddedPdfFonts(outDoc);
+    embeddedFontsIndexCache.set(outDoc, indexed);
+  }
+  return indexed;
+}
+
+export async function ensureCanvasEmbeddedFontFace(edit, pdfBytes, indexEmbeddedPdfFonts, loadPdfLib) {
+  if (!pdfBytes?.length || typeof document === "undefined" || !document.fonts) {
+    return null;
+  }
+
+  const matchKeys = collectFontMatchKeys(edit);
+  if (!matchKeys.size) {
+    return null;
+  }
+
+  const bytesKey = getPdfBytesCacheKey(pdfBytes);
+  let fontsByKey = canvasFontFaceCache.get(bytesKey);
+  if (!fontsByKey) {
+    fontsByKey = new Map();
+    canvasFontFaceCache.set(bytesKey, fontsByKey);
+  }
+
+  const match = findEmbeddedFontMatch(await getEmbeddedFontsIndexFromBytes(pdfBytes, indexEmbeddedPdfFonts, loadPdfLib), edit);
+  if (!match) {
+    return null;
+  }
+
+  const familyName = `pdf-edited-${normalizeFontKey(match.baseFont)}`;
+  if (fontsByKey.has(familyName)) {
+    return familyName;
+  }
+
+  try {
+    const face = new FontFace(familyName, match.bytes);
+    await face.load();
+    document.fonts.add(face);
+    fontsByKey.set(familyName, face);
+    return familyName;
+  } catch {
+    return null;
+  }
+}
+
+async function getEmbeddedFontsIndexFromBytes(pdfBytes, indexEmbeddedPdfFonts, loadPdfLib) {
+  const bytesKey = getPdfBytesCacheKey(pdfBytes);
+  if (embeddedFontsIndexBytesCache.has(bytesKey)) {
+    return embeddedFontsIndexBytesCache.get(bytesKey);
+  }
+
+  const { PDFDocument } = await loadPdfLib();
+  const doc = await PDFDocument.load(pdfBytes.slice());
+  const indexed = indexEmbeddedPdfFonts(doc);
+  embeddedFontsIndexBytesCache.set(bytesKey, indexed);
+  return indexed;
+}
+
+export async function resolveCanvasFontAsync(edit, viewportScale, pdfBytes, deps) {
+  const embeddedFamily = await ensureCanvasEmbeddedFontFace(
+    edit,
+    pdfBytes,
+    deps.indexEmbeddedPdfFonts,
+    deps.loadPdfLib,
+  );
+  if (embeddedFamily) {
+    const fontSizeCss = edit.fontSize * viewportScale;
+    return `${fontSizeCss}px "${embeddedFamily}", sans-serif`;
+  }
+  return resolveCanvasFont(edit, viewportScale);
 }
 
 export class PdfFontResolver {
@@ -207,7 +307,7 @@ export class PdfFontResolver {
 
   ensureIndexed() {
     if (!this.embeddedFontsByKey) {
-      this.embeddedFontsByKey = this.indexEmbeddedPdfFonts(this.outDoc);
+      this.embeddedFontsByKey = getEmbeddedFontsIndex(this.outDoc, this.indexEmbeddedPdfFonts);
     }
     return this.embeddedFontsByKey;
   }
@@ -238,18 +338,21 @@ export class PdfFontResolver {
     }
 
     const cacheKey = `embedded:${normalizeFontKey(match.baseFont)}`;
-    if (!embeddedFontBytesCache.has(cacheKey)) {
-      embeddedFontBytesCache.set(cacheKey, match.bytes);
+    const docKey = getDocumentCacheKey(this.outDoc);
+    const scopedBytesKey = `${docKey}:${cacheKey}`;
+    if (!embeddedFontBytesCache.has(scopedBytesKey)) {
+      embeddedFontBytesCache.set(scopedBytesKey, match.bytes);
     }
 
     try {
-      return await embedBytesFont(this.outDoc, cacheKey, embeddedFontBytesCache.get(cacheKey));
+      return await embedBytesFont(this.outDoc, cacheKey, embeddedFontBytesCache.get(scopedBytesKey));
     } catch {
       return null;
     }
   }
 
   async resolveFontForEdit(edit) {
+    this.ensureIndexed();
     const text = edit.newText ?? "";
     const needsCjk = containsCjkText(text);
 
