@@ -1,3 +1,4 @@
+import "./path2d-tracker.js";
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
 import * as pdfLib from "./pdf-lib-shim.js";
 import {
@@ -46,10 +47,6 @@ function loadPdfLib() {
 }
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_DIST_URL}/legacy/build/pdf.worker.mjs`;
-
-// PDF.js は図形を Path2D として組み立て、`ctx.fill(path2d)` で描画する。
-// その Path2D のバウンディングボックスを記録できるよう、Path2D を差し替える。
-installTrackedPath2D();
 
 const state = {
   pdfDoc: null,
@@ -737,6 +734,20 @@ function instrumentContext(ctx, info) {
   const shouldRecolorWhiteSymbolFill = (pdfBBox, cssBox) =>
     isSmallWhiteContent(pdfBBox) || isThinWhiteBar(cssBox) || isLinearWhiteSymbol(cssBox);
 
+  const isWhiteCoverCandidate = (pdfBBox, cssBox) => {
+    const deviceArea = cssBox.w * cssBox.h;
+    if (canvasArea > 0 && deviceArea / canvasArea >= 0.9) {
+      return true;
+    }
+    if (pdfBBox.w < 3 || pdfBBox.h < 3) {
+      return false;
+    }
+    if (pdfBBox.w * pdfBBox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
+      return false;
+    }
+    return true;
+  };
+
   const handleCover = (userBox, drawOriginal, styleProp = "fillStyle") => {
     const color = parseColor(ctx[styleProp]);
     if (!color || !isNearWhite(color, recolorThresholdFor(styleProp))) {
@@ -810,20 +821,29 @@ function instrumentContext(ctx, info) {
     // バウンディングボックスがあればそれを使い、無ければ ctx のパスを使う。
     const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
     const source = pathArg ? pathArg.__bbox : bbox;
-    if (!Number.isFinite(source.minX)) {
-      if (state.recolorText) {
+    if (state.recolorText && shouldRecolorNearWhite("fillStyle")) {
+      if (!Number.isFinite(source.minX)) {
         drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
         return;
       }
+      const userBox = { ...source };
+      const device = transformBox(userBox, ctx.getTransform());
+      if (device) {
+        const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+        const cssBox = cssBoxFromDevice(device);
+        if (shouldRecolorWhiteSymbolFill(pdfBBox, cssBox) || !isWhiteCoverCandidate(pdfBBox, cssBox)) {
+          drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
+          return;
+        }
+      } else {
+        drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
+        return;
+      }
+    }
+    if (!Number.isFinite(source.minX)) {
       return orig.fill(...args);
     }
-    const userBox = { ...source };
-    // 複雑パス（括弧など）の白塗りは被せ物ではなく記号として扱う。
-    if (state.recolorText && pathArg) {
-      drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
-      return;
-    }
-    handleCover(userBox, () => orig.fill(...args));
+    handleCover({ ...source }, () => orig.fill(...args));
   };
 
   ctx.fillRect = (x, y, w, h) => {
@@ -1185,97 +1205,6 @@ function includeInto(bbox, x, y) {
   if (y > bbox.maxY) bbox.maxY = y;
 }
 
-function installTrackedPath2D() {
-  const Native = globalThis.Path2D;
-  if (!Native || Native.__tracked) {
-    return;
-  }
-
-  class TrackedPath2D extends Native {
-    constructor(arg) {
-      super(arg);
-      this.__bbox = newBBox();
-      // 既存パスを複製する場合は bbox も引き継ぐ。
-      if (arg && typeof arg === "object" && arg.__bbox) {
-        const b = arg.__bbox;
-        includeInto(this.__bbox, b.minX, b.minY);
-        includeInto(this.__bbox, b.maxX, b.maxY);
-      }
-    }
-
-    moveTo(x, y) {
-      includeInto(this.__bbox, x, y);
-      return super.moveTo(x, y);
-    }
-    lineTo(x, y) {
-      includeInto(this.__bbox, x, y);
-      return super.lineTo(x, y);
-    }
-    rect(x, y, w, h) {
-      includeInto(this.__bbox, x, y);
-      includeInto(this.__bbox, x + w, y + h);
-      return super.rect(x, y, w, h);
-    }
-    roundRect(x, y, w, h, r) {
-      includeInto(this.__bbox, x, y);
-      includeInto(this.__bbox, x + w, y + h);
-      return super.roundRect(x, y, w, h, r);
-    }
-    bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y) {
-      includeInto(this.__bbox, cp1x, cp1y);
-      includeInto(this.__bbox, cp2x, cp2y);
-      includeInto(this.__bbox, x, y);
-      return super.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y);
-    }
-    quadraticCurveTo(cpx, cpy, x, y) {
-      includeInto(this.__bbox, cpx, cpy);
-      includeInto(this.__bbox, x, y);
-      return super.quadraticCurveTo(cpx, cpy, x, y);
-    }
-    arc(x, y, r, ...rest) {
-      includeInto(this.__bbox, x - r, y - r);
-      includeInto(this.__bbox, x + r, y + r);
-      return super.arc(x, y, r, ...rest);
-    }
-    arcTo(x1, y1, x2, y2, r) {
-      includeInto(this.__bbox, x1, y1);
-      includeInto(this.__bbox, x2, y2);
-      return super.arcTo(x1, y1, x2, y2, r);
-    }
-    ellipse(x, y, rx, ry, ...rest) {
-      includeInto(this.__bbox, x - rx, y - ry);
-      includeInto(this.__bbox, x + rx, y + ry);
-      return super.ellipse(x, y, rx, ry, ...rest);
-    }
-    addPath(path, transform) {
-      if (path && path.__bbox && Number.isFinite(path.__bbox.minX)) {
-        const b = path.__bbox;
-        const corners = [
-          [b.minX, b.minY],
-          [b.maxX, b.minY],
-          [b.minX, b.maxY],
-          [b.maxX, b.maxY],
-        ];
-        for (const [px, py] of corners) {
-          if (transform) {
-            includeInto(
-              this.__bbox,
-              transform.a * px + transform.c * py + transform.e,
-              transform.b * px + transform.d * py + transform.f,
-            );
-          } else {
-            includeInto(this.__bbox, px, py);
-          }
-        }
-      }
-      return super.addPath(path, transform);
-    }
-  }
-
-  TrackedPath2D.__tracked = true;
-  globalThis.Path2D = TrackedPath2D;
-}
-
 function transformBox(box, matrix) {
   if (!Number.isFinite(box.minX) || !Number.isFinite(box.maxX)) {
     return null;
@@ -1346,6 +1275,10 @@ function parseColor(value) {
   }
   const s = value.trim().toLowerCase();
 
+  if (s === "white") {
+    return { r: 255, g: 255, b: 255, a: 1 };
+  }
+
   if (s.startsWith("#")) {
     const hex = s.slice(1);
     if (hex.length === 3) {
@@ -1387,7 +1320,11 @@ function parseChannel(part) {
   if (part.endsWith("%")) {
     return Math.round((Number(part.slice(0, -1)) / 100) * 255);
   }
-  return Number(part);
+  const value = Number(part);
+  if (value >= 0 && value <= 1) {
+    return Math.round(value * 255);
+  }
+  return value;
 }
 
 function initThemeToggle() {
