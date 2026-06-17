@@ -125,12 +125,15 @@ async function transformResourceXObjects(pageNode, context, options) {
     return;
   }
 
-  const resources = context.lookup(resourcesRef, PDFDict);
+  const resources = context.lookupMaybe(resourcesRef, PDFDict);
+  if (!resources) {
+    return;
+  }
   await transformResourceXObjectsFromDict(resources, context, options);
 }
 
 async function transformResourceXObjectsFromDict(resources, context, options) {
-  const xObjectRef = resources?.lookup(PDFName.of("XObject"), PDFDict);
+  const xObjectRef = resources.lookupMaybe(PDFName.of("XObject"), PDFDict);
   if (!xObjectRef) {
     return;
   }
@@ -154,7 +157,7 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
       pageArea: bbox.width * bbox.height,
     };
 
-    const nestedResources = xObject.dict.lookup(PDFName.of("Resources"), PDFDict);
+    const nestedResources = xObject.dict.lookupMaybe(PDFName.of("Resources"), PDFDict);
     if (nestedResources) {
       await transformResourceXObjectsFromDict(nestedResources, context, formOptions);
     }
@@ -164,7 +167,7 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
 }
 
 function readFormBBox(dict) {
-  const bboxArray = dict?.lookup(PDFName.of("BBox"), PDFArray);
+  const bboxArray = dict?.lookupMaybe(PDFName.of("BBox"), PDFArray);
   if (!bboxArray || bboxArray.size() < 4) {
     return { x: 0, y: 0, width: 0, height: 0 };
   }
@@ -202,7 +205,7 @@ async function transformContentRefs(refs, context, options) {
     }
 
     options.processedStreams.add(ref);
-    const stream = context.lookup(ref, PDFRawStream);
+    const stream = context.lookupMaybe(ref, PDFRawStream);
     if (!stream) {
       continue;
     }
@@ -500,9 +503,24 @@ function tokenizeContentStream(bytes) {
       continue;
     }
 
+    if (char === "/") {
+      const name = readPdfName(source, index);
+      tokens.push(name.value);
+      index = name.nextIndex;
+      continue;
+    }
+
     const word = readWord(source, index);
+    if (word.nextIndex <= index) {
+      index += 1;
+      continue;
+    }
     tokens.push(word.value);
     index = word.nextIndex;
+
+    if (word.value === "ID") {
+      index = skipInlineImageData(source, index);
+    }
   }
 
   return tokens;
@@ -532,6 +550,27 @@ function readWord(source, index) {
     index += 1;
   }
   return { value: source.slice(start, index), nextIndex: index };
+}
+
+function readPdfName(source, index) {
+  let cursor = index + 1;
+  while (cursor < source.length) {
+    const char = source[cursor];
+    if (/[\0\t\n\f\r ]/.test(char) || "()[]<>/%#".includes(char)) {
+      break;
+    }
+    cursor += 1;
+  }
+  return { value: source.slice(index, cursor), nextIndex: cursor };
+}
+
+function skipInlineImageData(source, index) {
+  const pattern = /[\0\t\n\f\r ]EI(?=[\0\t\n\f\r ])/;
+  const match = pattern.exec(source.slice(index));
+  if (!match) {
+    return source.length;
+  }
+  return index + match.index + match[0].length;
 }
 
 function readLiteralString(source, index) {
