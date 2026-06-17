@@ -4,6 +4,7 @@ export {
   mapToStandardFont,
   normalizeFontKey,
   resolveCanvasFont,
+  resolveCanvasFontAsync,
   resolveCanvasFontFamily,
 } from "./font-matching-utils.js";
 export { indexEmbeddedPdfFonts } from "./font-pdf-extract.js";

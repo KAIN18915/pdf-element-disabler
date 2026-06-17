@@ -23,7 +23,7 @@
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
+      <header class="topbar sticky-header" id="sticky-header">
         <div class="topbar-brand">
           <div class="brand-mark" aria-hidden="true">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -34,17 +34,28 @@
           <div class="brand-copy">
             <div class="brand-row">
               <h1 class="brand-title">穴埋め解除ビューア</h1>
-              <span class="badge badge-outline">GitHub Pages</span>
+              <span class="badge badge-outline header-badge">GitHub Pages</span>
             </div>
             <p class="brand-description">
               白い被せ物を消す・白文字に色を付けて、隠された答えをブラウザ内で表示します。
             </p>
           </div>
         </div>
-        <div class="topbar-actions">
-          <button id="theme-toggle" class="btn btn-ghost btn-icon" type="button" aria-label="テーマを切り替え">
-            <span id="theme-icon" aria-hidden="true">☾</span>
-          </button>
+        <div class="topbar-toolbar">
+          <div class="toolbar-group" role="group" aria-label="元に戻す・やり直す">
+            <button id="undo-button" class="btn btn-outline btn-icon" type="button" disabled title="元に戻す (Ctrl+Z)" aria-label="元に戻す">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7v6h6" />
+                <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+              </svg>
+            </button>
+            <button id="redo-button" class="btn btn-outline btn-icon" type="button" disabled title="やり直す (Ctrl+Shift+Z)" aria-label="やり直す">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 7v6h-6" />
+                <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
+              </svg>
+            </button>
+          </div>
           <div class="btn-group" role="group" aria-label="PDFを開く">
             <button id="sample-button" class="btn btn-outline" type="button">サンプルを開く</button>
             <label class="btn file-button">
@@ -52,11 +63,18 @@
               <input id="file-input" type="file" accept="application/pdf,.pdf" />
             </label>
           </div>
+          <div class="btn-group" role="group" aria-label="PDFを保存">
+            <button id="download-raster-button" class="btn" type="button" disabled>画像で保存</button>
+            <button id="download-vector-button" class="btn btn-outline" type="button" disabled>ベクターで保存</button>
+          </div>
+          <button id="theme-toggle" class="btn btn-ghost btn-icon" type="button" aria-label="テーマを切り替え">
+            <span id="theme-icon" aria-hidden="true">☾</span>
+          </button>
         </div>
       </header>
 
       <div class="shell">
-        <aside class="sidebar" aria-label="操作">
+        <aside class="sidebar sticky-sidebar" aria-label="操作">
           <section class="card">
             <div class="card-header">
               <h2 class="card-title">穴埋め解除</h2>
@@ -125,6 +143,9 @@
                 <button id="text-edit-mode-button" class="btn btn-outline btn-block mode-button" type="button" disabled>
                   文字を編集
                 </button>
+                <button id="add-text-mode-button" class="btn btn-outline btn-block mode-button" type="button" disabled>
+                  テキストを追加
+                </button>
                 <button id="image-insert-mode-button" class="btn btn-outline btn-block mode-button" type="button" disabled>
                   画像を挿入
                 </button>
@@ -172,7 +193,7 @@
               <div class="card-header-row">
                 <div>
                   <h2 class="card-title">操作</h2>
-                  <p class="card-description">書き出しと編集のリセット</p>
+                  <p class="card-description">穴埋め解除のリセット</p>
                 </div>
                 <div class="badge-row" aria-label="被せ物の数">
                   <span class="badge badge-outline">検出 <span id="cover-count">0</span></span>
@@ -181,11 +202,9 @@
               </div>
             </div>
             <div class="card-footer">
-              <button id="download-raster-button" class="btn btn-block" type="button" disabled>画像で保存</button>
-              <button id="download-vector-button" class="btn btn-outline btn-block" type="button" disabled>ベクターで保存</button>
               <button id="reset-button" class="btn btn-outline btn-block" type="button" disabled>元の状態に戻す</button>
               <p class="field-hint">
-                「画像で保存」は各ページを画像として再構成します。「ベクターで保存」は元のPDF構造を保ちつつ白い被せ物の除去と文字色の変更を反映します。
+                穴埋め解除の設定（被せ物の表示・白文字の色付け）のみリセットします。文字・画像の編集はヘッダーの元に戻すで取り消せます。
               </p>
             </div>
           </section>
@@ -226,15 +245,30 @@
 
     <dialog id="text-edit-dialog" class="text-edit-dialog">
       <form method="dialog" class="text-edit-form">
-        <h3 class="text-edit-title">文字を編集</h3>
+        <h3 id="text-edit-title" class="text-edit-title">文字を編集</h3>
         <p id="text-edit-original" class="text-edit-original"></p>
         <label class="field" for="text-edit-input">
-          <span class="field-label">新しい文字</span>
+          <span class="field-label">テキスト</span>
           <input id="text-edit-input" class="text-input" type="text" autocomplete="off" />
         </label>
+        <div id="text-edit-extra-fields" class="text-edit-extra-fields" hidden>
+          <div class="field-row">
+            <label class="field field-inline" for="text-edit-size">
+              <span class="field-label">サイズ (pt)</span>
+              <input id="text-edit-size" class="text-input text-input-narrow" type="number" min="4" max="200" step="0.5" value="12" />
+            </label>
+            <label class="field field-inline" for="text-edit-color">
+              <span class="field-label">色</span>
+              <input id="text-edit-color" type="color" value="#000000" />
+            </label>
+          </div>
+        </div>
         <div class="text-edit-actions">
-          <button id="text-edit-cancel" class="btn btn-outline" type="button" value="cancel">キャンセル</button>
-          <button id="text-edit-save" class="btn" type="submit" value="save">適用</button>
+          <button id="text-edit-delete" class="btn btn-outline btn-destructive" type="button" hidden>削除</button>
+          <div class="text-edit-actions-right">
+            <button id="text-edit-cancel" class="btn btn-outline" type="button" value="cancel">キャンセル</button>
+            <button id="text-edit-save" class="btn" type="submit" value="save">適用</button>
+          </div>
         </div>
       </form>
     </dialog>
