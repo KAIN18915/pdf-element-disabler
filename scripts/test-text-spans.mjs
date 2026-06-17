@@ -1,7 +1,9 @@
 import * as pdfjsLib from "../node_modules/pdfjs-dist/legacy/build/pdf.mjs";
 import {
   buildMockTextEntry,
+  getFontAscentRatio,
   getTextItemPdfBBox,
+  getTextSpaceDescent,
   getTextSpansForPage,
   mergeTextItemsIntoSpans,
 } from "../text-span-utils.js";
@@ -47,6 +49,147 @@ function testSingleItemBboxRatio() {
   const bbox = getTextItemPdfBBox(item);
   const ratio = bbox.w / Math.max(bbox.h, 0.01);
   assert(ratio > 1, `Single horizontal text should be wider than tall (ratio=${ratio.toFixed(2)})`);
+  assert(bbox.h <= 12, `Default bbox height should not exceed 1em (h=${bbox.h.toFixed(2)})`);
+}
+
+function testStyleDescentTightensHeight() {
+  const item = {
+    str: "Hello World",
+    transform: [14, 0, 0, -14, 100, 700],
+    width: 72.338,
+  };
+  const looseStyle = { ascent: 0.718 };
+  const tightStyle = { ascent: 0.718, descent: -0.207 };
+  const loose = getTextItemPdfBBox(item, looseStyle);
+  const tight = getTextItemPdfBBox(item, tightStyle);
+  assert(
+    tight.h < loose.h,
+    `style.descent should shorten bbox (tight=${tight.h.toFixed(2)} loose=${loose.h.toFixed(2)})`,
+  );
+  assert(
+    Math.abs(tight.h - 14 * (0.718 + 0.207)) < 0.2,
+    `Height should match ascent+|descent| (h=${tight.h.toFixed(2)})`,
+  );
+  assert(
+    Math.abs(getTextSpaceDescent(tightStyle, getFontAscentRatio(tightStyle)) - 0.207) < 0.001,
+    "Descent helper should use PDF.js style.descent magnitude",
+  );
+}
+
+function testHorizontalTrim() {
+  const item = {
+    str: "Hello",
+    transform: [12, 0, 0, -12, 100, 700],
+    width: 33,
+  };
+  const bbox = getTextItemPdfBBox(item);
+  assert(bbox.w < 33, `Width should trim trailing advance (w=${bbox.w.toFixed(2)})`);
+  assert(bbox.w >= 31, `Width trim should stay close to advance (w=${bbox.w.toFixed(2)})`);
+}
+
+function testCommaSpaceMerge() {
+  const fontSize = 12;
+  const baselineY = 700;
+  const items = [
+    buildMockTextEntry({
+      index: 0,
+      str: "Hello",
+      transform: [fontSize, 0, 0, -fontSize, 100, baselineY],
+      width: 30,
+    }),
+    buildMockTextEntry({
+      index: 1,
+      str: ",",
+      transform: [fontSize, 0, 0, -fontSize, 132, baselineY],
+      width: 4,
+    }),
+    buildMockTextEntry({
+      index: 2,
+      str: " world",
+      transform: [fontSize, 0, 0, -fontSize, 138, baselineY],
+      width: 42,
+    }),
+  ];
+
+  const spans = mergeTextItemsIntoSpans(items);
+  assert(spans.length === 1, `Comma phrase should merge into one span, got ${spans.length}`);
+  assert(
+    spans[0].originalText === "Hello, world",
+    `Expected "Hello, world", got "${spans[0].originalText}"`,
+  );
+}
+
+function testSpaceSeparatedWordsMerge() {
+  const fontSize = 12;
+  const baselineY = 700;
+  const items = [
+    buildMockTextEntry({
+      index: 0,
+      str: "a",
+      transform: [fontSize, 0, 0, -fontSize, 100, baselineY],
+      width: 7,
+    }),
+    buildMockTextEntry({
+      index: 1,
+      str: " ",
+      transform: [fontSize, 0, 0, -fontSize, 108, baselineY],
+      width: 4,
+    }),
+    buildMockTextEntry({
+      index: 2,
+      str: "b",
+      transform: [fontSize, 0, 0, -fontSize, 112, baselineY],
+      width: 7,
+    }),
+    buildMockTextEntry({
+      index: 3,
+      str: " ",
+      transform: [fontSize, 0, 0, -fontSize, 120, baselineY],
+      width: 4,
+    }),
+    buildMockTextEntry({
+      index: 4,
+      str: "c",
+      transform: [fontSize, 0, 0, -fontSize, 124, baselineY],
+      width: 7,
+    }),
+  ];
+
+  const spans = mergeTextItemsIntoSpans(items);
+  assert(spans.length === 1, `"a b c" should merge into one span, got ${spans.length}`);
+  assert(spans[0].originalText === "a b c", `Expected "a b c", got "${spans[0].originalText}"`);
+}
+
+function testSpacedCommaPhraseMerge() {
+  const fontSize = 12;
+  const baselineY = 700;
+  const items = [
+    buildMockTextEntry({
+      index: 0,
+      str: "word",
+      transform: [fontSize, 0, 0, -fontSize, 100, baselineY],
+      width: 24,
+    }),
+    buildMockTextEntry({
+      index: 1,
+      str: " , ",
+      transform: [fontSize, 0, 0, -fontSize, 126, baselineY],
+      width: 18,
+    }),
+    buildMockTextEntry({
+      index: 2,
+      str: "word",
+      transform: [fontSize, 0, 0, -fontSize, 146, baselineY],
+      width: 24,
+    }),
+  ];
+
+  const spans = mergeTextItemsIntoSpans(items);
+  assert(spans.length === 1, `"word , word" should merge into one span, got ${spans.length}`);
+  assert(
+    spans[0].originalText === "word , word",
+    `Expected "word , word", got "${spans[0].originalText}"`,
+  );
 }
 
 function testInlineMathMerge() {
@@ -65,21 +208,21 @@ function testInlineMathMerge() {
       str: "x",
       transform: [mathSize, 0, 0, -mathSize, 124, baselineY + 1.5],
       width: 6,
-      style: { ascent: 0.75 },
+      style: { ascent: 0.75, descent: -0.22 },
     }),
     buildMockTextEntry({
       index: 2,
       str: "+",
       transform: [mathSize, 0, 0, -mathSize, 130, baselineY - 0.5],
       width: 6,
-      style: { ascent: 0.75 },
+      style: { ascent: 0.75, descent: -0.22 },
     }),
     buildMockTextEntry({
       index: 3,
       str: "y",
       transform: [mathSize, 0, 0, -mathSize, 136, baselineY + 1],
       width: 6,
-      style: { ascent: 0.75 },
+      style: { ascent: 0.75, descent: -0.22 },
     }),
     buildMockTextEntry({
       index: 4,
@@ -101,6 +244,11 @@ function testInlineMathMerge() {
 
 async function main() {
   testSingleItemBboxRatio();
+  testStyleDescentTightensHeight();
+  testHorizontalTrim();
+  testCommaSpaceMerge();
+  testSpaceSeparatedWordsMerge();
+  testSpacedCommaPhraseMerge();
   testInlineMathMerge();
 
   const bytes = await loadSamplePdfBytes();
@@ -118,7 +266,7 @@ async function main() {
     console.log(
       `  w=${span.bbox.w.toFixed(1)} h=${span.bbox.h.toFixed(1)} ratio=${ratio.toFixed(2)} "${preview}"`,
     );
-    if (ratio < 0.8) {
+    if (ratio < 0.75) {
       tallNarrow += 1;
     } else {
       okRatio += 1;
