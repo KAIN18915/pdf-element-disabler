@@ -76,9 +76,14 @@ function testNegativeScaleCssAlignment() {
     Math.abs(cssBox.y - expected.y) < 0.05,
     `Top should match PDF.js TextLayer (got=${cssBox.y.toFixed(2)} expected=${expected.y.toFixed(2)})`,
   );
+  const tightHeight = 12 * viewport.scale * (getFontAscentRatio({}) + getTextSpaceDescent({}));
   assert(
-    Math.abs(cssBox.h - expected.h) < 0.05,
-    `Height should match PDF.js TextLayer (got=${cssBox.h.toFixed(2)} expected=${expected.h.toFixed(2)})`,
+    cssBox.h < expected.h,
+    `Hit box height should be tighter than full TextLayer em (got=${cssBox.h.toFixed(2)} textLayer=${expected.h.toFixed(2)})`,
+  );
+  assert(
+    Math.abs(cssBox.h - tightHeight) < 0.05,
+    `Height should follow ascent+|descent| (got=${cssBox.h.toFixed(2)} expected=${tightHeight.toFixed(2)})`,
   );
   assert(
     cssBox.w < expected.w,
@@ -95,7 +100,10 @@ function testSingleItemBboxRatio() {
   const bbox = getTextItemPdfBBox(item);
   const ratio = bbox.w / Math.max(bbox.h, 0.01);
   assert(ratio > 1, `Single horizontal text should be wider than tall (ratio=${ratio.toFixed(2)})`);
-  assert(bbox.h <= 12 + 0.01, `Default bbox height should not exceed 1em (h=${bbox.h.toFixed(2)})`);
+  assert(
+    bbox.h <= 12 * (0.75 + 0.18) + 0.01,
+    `Default bbox height should use capped descent (h=${bbox.h.toFixed(2)})`,
+  );
 }
 
 function testStyleDescentTightensHeight() {
