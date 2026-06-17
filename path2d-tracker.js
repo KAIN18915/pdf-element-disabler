@@ -102,6 +102,9 @@ export function installTrackedPath2D() {
       }
       return super.addPath(path, transform);
     }
+    closePath() {
+      return super.closePath();
+    }
   }
 
   TrackedPath2D.__tracked = true;

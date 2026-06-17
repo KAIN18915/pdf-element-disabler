@@ -510,6 +510,113 @@ async function testFormInheritedWhiteStrokeRecolor() {
   console.log("OK: inherited white matrix stroke in Form XObject recolored");
 }
 
+async function testPathBackgroundPreserved() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const cases = [
+    "1 1 1 rg 0 0 612 792 re f",
+    "0 0 612 792 re 1 1 1 rg f",
+    "q 1 1 1 rg 0 0 612 792 re f Q",
+    "1 1 1 rg 0 0 m 612 0 l 612 792 l 0 792 l h f",
+  ];
+
+  for (const source of cases) {
+    const transformed = transformContentBytes(new TextEncoder().encode(source), opts);
+    const text = new TextDecoder("latin1").decode(transformed);
+    if (text.includes(`${TARGET_RGB} rg f`) || text.includes(`${TARGET_RGB} rg F`)) {
+      throw new Error(`Page background was recolored for stream: ${source}\n${text}`);
+    }
+    if (!text.includes("1 1 1 rg")) {
+      throw new Error(`Page background white operator missing for stream: ${source}\n${text}`);
+    }
+  }
+
+  console.log("OK: full-page and path-based white backgrounds stay white");
+}
+
+async function testWhiteTextVisibleBeforeTj() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const gsStream = transformContentBytes(
+    new TextEncoder().encode(
+      "100 600 200 40 re 0.9 0.1 0.1 rg f BT q 1 1 1 rg /Gs1 gs /F1 12 Tf 110 615 Td (Hi) Tj ET Q\n",
+    ),
+    opts,
+  );
+  const gsText = new TextDecoder("latin1").decode(gsStream);
+  const tjIndex = gsText.indexOf("Tj");
+  if (tjIndex === -1) {
+    throw new Error(`Expected Tj in gs stream: ${gsText}`);
+  }
+  const beforeTj = gsText.slice(0, tjIndex);
+  if (!beforeTj.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`White text after gs was not recolored before Tj: ${gsText}`);
+  }
+
+  const backgroundStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 0 0 612 792 re f BT 1 1 1 rg /F1 12 Tf 72 720 Td (Hi) Tj ET\n"),
+    opts,
+  );
+  const backgroundText = new TextDecoder("latin1").decode(backgroundStream);
+  if (backgroundText.includes(`${TARGET_RGB} rg f`)) {
+    throw new Error(`Background recolored alongside text stream: ${backgroundText}`);
+  }
+  const textTjIndex = backgroundText.indexOf("Tj");
+  if (!backgroundText.slice(0, textTjIndex).includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`White text on preserved background missing recolor before Tj: ${backgroundText}`);
+  }
+
+  console.log("OK: white text recolored before Tj without touching page background");
+}
+
+async function testBracketStrokeRecolor() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const bracketStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 RG 2 w 10 20 m 10 80 l S 100 20 m 130 20 l 130 80 l S\n"),
+    baseOptions,
+  );
+  const bracketText = new TextDecoder("latin1").decode(bracketStream);
+  if (!bracketText.includes(`${TARGET_RGB} RG S`)) {
+    throw new Error(`Expected matrix bracket strokes to be recolored before S: ${bracketText}`);
+  }
+  if ((bracketText.match(/\bS\b/g) ?? []).length < 2) {
+    throw new Error(`Expected both bracket strokes to remain in stream: ${bracketText}`);
+  }
+
+  console.log("OK: matrix bracket strokes recolored before S");
+}
+
 async function testRecolorOnlyTransformRuns() {
   const sampleBytes = await makeSamplePdf();
   const beforeDoc = await PDFDocument.load(sampleBytes.slice());
@@ -550,6 +657,9 @@ async function main() {
   await testRecolorOperators();
   await testRedHighlightWhiteText();
   await testPathStrokeAndThinFillRecolor();
+  await testPathBackgroundPreserved();
+  await testWhiteTextVisibleBeforeTj();
+  await testBracketStrokeRecolor();
   await testFormInheritedWhiteTextRecolor();
   await testFormInheritedWhiteStrokeRecolor();
   await testRecolorOnlyTransformRuns();
