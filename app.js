@@ -1,6 +1,10 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
 import * as pdfLib from "./pdf-lib-shim.js";
-import { makeCoverKey, transformPdfContent } from "./pdf-content-transform.js";
+import {
+  makeCoverKey,
+  needsContentStreamTransform,
+  transformPdfContent,
+} from "./pdf-content-transform.js";
 import { estimateTextWidth, getTextSpansForPage } from "./text-span-utils.js";
 const EXPORT_RENDER_SCALE = 2;
 const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624";
@@ -362,6 +366,7 @@ async function buildPageShell(pageNumber, token) {
     pageNumber,
     shell,
     coverCount: covers.length,
+    coverKeys: covers.map((cover) => cover.key),
     widthPt,
     heightPt,
     viewport,
@@ -485,6 +490,19 @@ function canvasToPngBytes(canvas) {
   });
 }
 
+function buildRevealedCoversForExport() {
+  if (state.revealAllOverlays) {
+    const keys = new Set();
+    for (const view of state.pageViews.values()) {
+      for (const key of view.coverKeys ?? []) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+  return new Set(state.revealedCovers);
+}
+
 async function downloadModifiedPdfVector() {
   const { pdfBytes, pdfName } = state;
   if (!pdfBytes || state.pageViews.size === 0) {
@@ -499,13 +517,16 @@ async function downloadModifiedPdfVector() {
   try {
     const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
     const outDoc = await PDFDocument.load(pdfBytes.slice());
-    await transformPdfContent(outDoc, {
+    const revealedCovers = buildRevealedCoversForExport();
+    const transformOptions = {
       whiteThreshold: state.whiteThreshold,
-      revealAllOverlays: state.revealAllOverlays,
-      revealedCovers: state.revealedCovers,
+      revealedCovers,
       recolorText: state.recolorText,
       textColor: state.textColor,
-    });
+    };
+    if (needsContentStreamTransform(transformOptions)) {
+      await transformPdfContent(outDoc, transformOptions);
+    }
     await applyUserEditsToVectorPdf(outDoc, { StandardFonts, rgb });
 
     if (token !== state.renderToken) {
