@@ -383,7 +383,7 @@ async function testRedHighlightWhiteText() {
   console.log("OK: red highlight + white text streams recolored for visibility");
 }
 
-async function testPathStrokeAndThinFillRecolor() {
+async function testPathStrokeRecolorOnly() {
   const baseOptions = {
     whiteThreshold: 238,
     strokeWhiteThreshold: 220,
@@ -414,13 +414,22 @@ async function testPathStrokeAndThinFillRecolor() {
     throw new Error(`Expected white bracket stroke to be recolored before S: ${bracketText}`);
   }
 
+  const thickStrokeStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 RG 3 w 0 0 m 0 0 l 0 50 l S\n"),
+    baseOptions,
+  );
+  const thickStrokeText = new TextDecoder("latin1").decode(thickStrokeStream);
+  if (thickStrokeText.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Thick white stroke should not be recolored: ${thickStrokeText}`);
+  }
+
   const fractionStream = transformContentBytes(
     new TextEncoder().encode("1 1 1 rg 10 10 100 1 re f\n"),
     baseOptions,
   );
   const fractionText = new TextDecoder("latin1").decode(fractionStream);
-  if (!fractionText.includes(`${TARGET_RGB} rg f`)) {
-    throw new Error(`Expected thin white fraction bar fill to be recolored before f: ${fractionText}`);
+  if (fractionText.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`White fill paths must not be recolored at paint time: ${fractionText}`);
   }
 
   const coverStream = transformContentBytes(
@@ -432,7 +441,19 @@ async function testPathStrokeAndThinFillRecolor() {
     throw new Error(`Large white cover rect should remain untouched: ${coverText}`);
   }
 
-  console.log("OK: path strokes and thin fills recolored without touching cover rects");
+  const pageBackgroundStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 0 0 612 792 re f\n"),
+    baseOptions,
+  );
+  const pageBackgroundText = new TextDecoder("latin1").decode(pageBackgroundStream);
+  if (pageBackgroundText.includes(TARGET_RGB)) {
+    throw new Error(`Full-page white background must stay white: ${pageBackgroundText}`);
+  }
+  if (!pageBackgroundText.includes("1 1 1 rg") || !pageBackgroundText.includes(" re f")) {
+    throw new Error(`Full-page white background fill was altered: ${pageBackgroundText}`);
+  }
+
+  console.log("OK: thin path strokes recolored; fills and page background preserved");
 }
 
 async function testFormInheritedWhiteTextRecolor() {
@@ -656,7 +677,7 @@ async function testRecolorOnlyTransformRuns() {
 async function main() {
   await testRecolorOperators();
   await testRedHighlightWhiteText();
-  await testPathStrokeAndThinFillRecolor();
+  await testPathStrokeRecolorOnly();
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
