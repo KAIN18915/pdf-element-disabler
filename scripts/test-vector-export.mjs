@@ -435,10 +435,124 @@ async function testPathStrokeAndThinFillRecolor() {
   console.log("OK: path strokes and thin fills recolored without touching cover rects");
 }
 
+async function testFormInheritedWhiteTextRecolor() {
+  const formBytes = new TextEncoder().encode("BT /F1 12 Tf 10 20 Td (Hidden) Tj ET\n");
+  const pageBytes = new TextEncoder().encode("1 1 1 rg /Fm0 Do\n");
+  const formResolver = (nameToken) => {
+    if (nameToken !== "/Fm0") {
+      return null;
+    }
+    return {
+      bytes: formBytes,
+      width: 200,
+      height: 200,
+      nestedFormResolver: () => null,
+    };
+  };
+
+  const transformed = transformContentBytes(pageBytes, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+    formResolver,
+  });
+  const text = new TextDecoder("latin1").decode(transformed);
+  if (!text.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`Expected inherited white form text to be recolored: ${text}`);
+  }
+  const inlinedSegment = text.slice(text.indexOf("q"));
+  if (inlinedSegment.includes("1 1 1 rg") && inlinedSegment.includes("Tj")) {
+    throw new Error(`Form text still uses near-white fill before Tj: ${text}`);
+  }
+  if (text.includes("/Fm0 Do")) {
+    throw new Error(`Expected Form XObject to be inlined during recolor: ${text}`);
+  }
+  console.log("OK: inherited white text in Form XObject recolored at Do inline");
+}
+
+async function testFormInheritedWhiteStrokeRecolor() {
+  const formBytes = new TextEncoder().encode("0 0 m 0 50 l S\n");
+  const pageBytes = new TextEncoder().encode("1 1 1 RG /Fm0 Do\n");
+  const formResolver = (nameToken) => {
+    if (nameToken !== "/Fm0") {
+      return null;
+    }
+    return {
+      bytes: formBytes,
+      width: 20,
+      height: 50,
+      nestedFormResolver: () => null,
+    };
+  };
+
+  const transformed = transformContentBytes(pageBytes, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+    formResolver,
+  });
+  const text = new TextDecoder("latin1").decode(transformed);
+  if (!text.includes(`${TARGET_RGB} RG S`)) {
+    throw new Error(`Expected inherited white bracket stroke to be recolored: ${text}`);
+  }
+  console.log("OK: inherited white matrix stroke in Form XObject recolored");
+}
+
+async function testRecolorOnlyTransformRuns() {
+  const sampleBytes = await makeSamplePdf();
+  const beforeDoc = await PDFDocument.load(sampleBytes.slice());
+  const beforeText = new TextDecoder("latin1").decode(new Uint8Array(await beforeDoc.save()));
+
+  const outDoc = await PDFDocument.load(sampleBytes.slice());
+  await transformPdfContent(outDoc, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+  });
+  const afterTokens = await loadPageTokens(outDoc, 0);
+  const afterText = afterTokens.join(" ");
+
+  if (!needsContentStreamTransform({ recolorText: true, revealedCovers: new Set() })) {
+    throw new Error("recolorText must force content stream transform");
+  }
+  if (!afterText.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`Recolor-only export missing target rgb in stream: ${afterText}`);
+  }
+  const hiddenAnswerIndex = afterText.indexOf("<48696464656E20616E73776572> Tj");
+  if (hiddenAnswerIndex === -1) {
+    throw new Error(`Recolor-only export missing hidden answer text operator: ${afterText}`);
+  }
+  const beforeHidden = afterText.slice(0, hiddenAnswerIndex);
+  if (!beforeHidden.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`Hidden answer text was not recolored before Tj: ${afterText}`);
+  }
+  if (afterText === beforeText) {
+    throw new Error("Recolor-only export left page stream unchanged");
+  }
+  console.log("OK: recolorText alone rewrites streams without cover reveal");
+}
+
 async function main() {
   await testRecolorOperators();
   await testRedHighlightWhiteText();
   await testPathStrokeAndThinFillRecolor();
+  await testFormInheritedWhiteTextRecolor();
+  await testFormInheritedWhiteStrokeRecolor();
+  await testRecolorOnlyTransformRuns();
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
 

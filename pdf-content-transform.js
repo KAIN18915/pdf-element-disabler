@@ -128,6 +128,7 @@ export async function transformPdfContent(pdfDoc, options) {
     const page = pages[pageIndex];
     const pageNumber = pageIndex + 1;
     const { width, height } = page.getSize();
+    const resourcesRef = page.node.get(PDFName.of("Resources"));
     const transformOptions = {
       ...options,
       pageNumber,
@@ -135,11 +136,92 @@ export async function transformPdfContent(pdfDoc, options) {
       pageHeight: height,
       pageArea: width * height,
       processedStreams,
+      formResolver: options.recolorText
+        ? createFormResolver(resourcesRef, context)
+        : null,
     };
 
-    await transformResourceXObjects(page.node, context, transformOptions);
+    if (!options.recolorText) {
+      await transformResourceXObjects(page.node, context, transformOptions);
+    }
     await transformContentRefs(getPageContentRefs(page, context), context, transformOptions);
   }
+}
+
+function lookupXObjectRefInDict(name, resourcesDict) {
+  if (!resourcesDict) {
+    return null;
+  }
+  const xObjects = resourcesDict.lookupMaybe(PDFName.of("XObject"), PDFDict);
+  if (!xObjects) {
+    return null;
+  }
+  const ref = xObjects.get(name);
+  return ref instanceof PDFRef ? ref : null;
+}
+
+function lookupXObjectRef(name, resourcesDict, context, parentResourceDicts = []) {
+  let ref = lookupXObjectRefInDict(name, resourcesDict);
+  if (ref) {
+    return ref;
+  }
+  for (const parentRef of parentResourceDicts) {
+    const parentDict = context.lookupMaybe(parentRef, PDFDict);
+    ref = lookupXObjectRefInDict(name, parentDict);
+    if (ref) {
+      return ref;
+    }
+  }
+  return null;
+}
+
+function createFormResolver(resourcesRef, context, parentResourceRefs = []) {
+  const resourcesDict = resourcesRef ? context.lookupMaybe(resourcesRef, PDFDict) : null;
+
+  return (nameToken) => {
+    if (typeof nameToken !== "string" || !nameToken.startsWith("/")) {
+      return null;
+    }
+
+    const name = PDFName.of(nameToken.slice(1));
+    const ref = lookupXObjectRef(name, resourcesDict, context, parentResourceRefs);
+    if (!ref) {
+      return null;
+    }
+
+    const xObject = context.lookup(ref);
+    const dict = xObject?.dict;
+    if (!dict) {
+      return null;
+    }
+
+    const subtype = dict.get(PDFName.of("Subtype"));
+    if (subtype?.toString() !== "/Form") {
+      return null;
+    }
+
+    const stream = context.lookupMaybe(ref, PDFRawStream);
+    if (!stream) {
+      return null;
+    }
+
+    const bbox = readFormBBox(dict);
+    const nestedResourcesRef = dict.get(PDFName.of("Resources"));
+    const nestedFormResolver = nestedResourcesRef
+      ? createFormResolver(
+        nestedResourcesRef,
+        context,
+        [...parentResourceRefs, resourcesRef].filter(Boolean),
+      )
+      : () => null;
+
+    return {
+      bytes: decodePDFRawStream(stream).decode(),
+      width: bbox.width,
+      height: bbox.height,
+      nestedFormResolver,
+    };
+  };
 }
 
 async function transformResourceXObjects(pageNode, context, options) {
@@ -275,7 +357,11 @@ function transformContentBytes(bytes, options) {
 
   const tokens = tokenizeContentStream(bytes);
   const output = [];
-  const state = createGraphicsState(options.pageWidth, options.pageHeight);
+  const state = createGraphicsState(
+    options.pageWidth,
+    options.pageHeight,
+    options.inheritedGraphicsState ?? null,
+  );
 
   for (let index = 0; index < tokens.length; ) {
     const token = tokens[index];
@@ -307,6 +393,29 @@ function transformContentBytes(bytes, options) {
     }
 
     if (isOperator(token)) {
+      if (token === "Do" && options.recolorText && options.formResolver) {
+        const formInfo = options.formResolver(tokens[index - 1]);
+        if (formInfo) {
+          if (output.length > 0 && output[output.length - 1] === tokens[index - 1]) {
+            output.pop();
+          }
+          output.push("q");
+          const formOptions = {
+            ...options,
+            inheritedGraphicsState: cloneGraphicsState(state),
+            pageWidth: formInfo.width,
+            pageHeight: formInfo.height,
+            pageArea: formInfo.width * formInfo.height,
+            formResolver: formInfo.nestedFormResolver,
+          };
+          const nestedBytes = transformContentBytes(formInfo.bytes, formOptions);
+          output.push(...tokenizeContentStream(nestedBytes));
+          output.push("Q");
+          index += 1;
+          continue;
+        }
+      }
+
       if (options.recolorText && tryInjectRecolorBeforePaint(tokens, index, token, state, options, output)) {
         index += 1;
         continue;
@@ -321,7 +430,15 @@ function transformContentBytes(bytes, options) {
   return new TextEncoder().encode(joinTokens(output));
 }
 
-function createGraphicsState(pageWidth, pageHeight) {
+function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
+  if (inheritedState) {
+    const cloned = cloneGraphicsState(inheritedState);
+    cloned.pageWidth = pageWidth;
+    cloned.pageHeight = pageHeight;
+    cloned.stack = [];
+    return cloned;
+  }
+
   return {
     pageWidth,
     pageHeight,
@@ -659,12 +776,12 @@ function targetColorFromOptions(options) {
 
 function emitTextShowOperator(tokens, operatorIndex, token, output) {
   if (token === "Tj" || token === "TJ" || token === "'") {
-    output.push(tokens[operatorIndex - 1], token);
+    output.push(token);
     return operatorIndex + 1;
   }
 
   if (token === '"') {
-    output.push(tokens[operatorIndex - 3], tokens[operatorIndex - 2], tokens[operatorIndex - 1], token);
+    output.push(token);
     return operatorIndex + 1;
   }
 
