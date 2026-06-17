@@ -85,6 +85,11 @@ const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
 const STROKE_WHITE_THRESHOLD_CAP = 220;
 const MAX_SYMBOL_STROKE_LINE_WIDTH = 2;
+export const MAX_BRACKET_STROKE_LINE_WIDTH = 5;
+export const MIN_BRACKET_EXTENT_PT = 20;
+export const BRACKET_ASPECT_RATIO = 3;
+const MAX_THIN_SYMBOL_AREA = 2000;
+const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const PAGE_BACKGROUND_AREA_RATIO = 0.9;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
@@ -840,7 +845,6 @@ function injectRecoloredTextPaint(output, state, options) {
     const recolored = targetColorFromOptions(options);
     state.fillColor = recolored;
     state.lastKnownFillColor = recolored;
-    return;
   }
 
   if (usesStroke && shouldRecolorTextPaint(strokeColor, getStrokeThreshold(options))) {
@@ -910,13 +914,79 @@ function applyRecoloredColorToState(state, operator, options) {
   state.fillColor = color;
 }
 
-function shouldRecolorStrokeAtPaint(state, options) {
-  if (!isNearWhiteColor(state.strokeColor, getStrokeThreshold(options))) {
+export function isBracketLikeBbox(bbox) {
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
     return false;
   }
 
-  const lineWidth = state.lineWidth ?? 1;
-  if (lineWidth > MAX_SYMBOL_STROKE_LINE_WIDTH) {
+  const w = Math.max(bbox.w, 0);
+  const h = Math.max(bbox.h, 0);
+
+  if (h >= MIN_BRACKET_EXTENT_PT && (h >= BRACKET_ASPECT_RATIO * Math.max(w, 1.5) || h >= 50)) {
+    return true;
+  }
+
+  if (w >= MIN_BRACKET_EXTENT_PT && h >= 1.5 && w >= BRACKET_ASPECT_RATIO * Math.max(h, 1.5)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isThinSymbolBbox(bbox) {
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
+    return false;
+  }
+
+  const w = bbox.w;
+  const h = bbox.h;
+  const area = w * h;
+
+  if (area >= MAX_THIN_SYMBOL_AREA) {
+    return false;
+  }
+
+  if (w < 3 || h < 3) {
+    return area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+  }
+
+  const minDim = Math.min(w, h);
+  const maxDim = Math.max(w, h);
+  return minDim > 0
+    && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO
+    && area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+}
+
+export function shouldRecolorNearWhiteStroke(bbox, lineWidth, options) {
+  if (!bbox || !Number.isFinite(lineWidth)) {
+    return false;
+  }
+
+  if (lineWidth > MAX_BRACKET_STROKE_LINE_WIDTH) {
+    return false;
+  }
+
+  if (isPageBackgroundBbox(bbox, options)) {
+    return false;
+  }
+
+  if (isWhiteCoverRect(bbox, options)) {
+    return false;
+  }
+
+  if (isBracketLikeBbox(bbox)) {
+    return true;
+  }
+
+  if (lineWidth <= MAX_SYMBOL_STROKE_LINE_WIDTH && isThinSymbolBbox(bbox)) {
+    return true;
+  }
+
+  return false;
+}
+
+function shouldRecolorStrokeAtPaint(state, options) {
+  if (!isNearWhiteColor(state.strokeColor, getStrokeThreshold(options))) {
     return false;
   }
 
@@ -925,15 +995,7 @@ function shouldRecolorStrokeAtPaint(state, options) {
     return false;
   }
 
-  if (isPageBackgroundBbox(rect, options)) {
-    return false;
-  }
-
-  if (isWhiteCoverRect(rect, options)) {
-    return false;
-  }
-
-  return rect.w * rect.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+  return shouldRecolorNearWhiteStroke(rect, state.lineWidth ?? 1, options);
 }
 
 function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
@@ -1552,6 +1614,8 @@ export const __test__ = {
   makeCoverKey,
   needsContentStreamTransform,
   isPageBackgroundBbox,
+  isBracketLikeBbox,
+  shouldRecolorNearWhiteStroke,
   shouldRecolorStrokeAtPaint,
   createGraphicsState,
 };

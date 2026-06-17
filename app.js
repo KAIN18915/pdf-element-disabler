@@ -4,6 +4,7 @@ import * as pdfLib from "./pdf-lib-shim.js";
 import {
   makeCoverKey,
   needsContentStreamTransform,
+  shouldRecolorNearWhiteStroke,
   transformPdfContent,
 } from "./pdf-content-transform.js";
 import {
@@ -28,9 +29,6 @@ const DEFAULT_NEW_TEXT_SIZE = 12;
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
 // 白ストローク（括弧など）の明るさ判定上限。
 const STROKE_WHITE_THRESHOLD_CAP = 220;
-// 記号ストロークのみ再着色: 線幅・CSS 面積の上限。
-const MAX_SYMBOL_STROKE_LINE_WIDTH = 2;
-const MAX_SYMBOL_STROKE_CSS_AREA = 2000;
 const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const PAGE_BACKGROUND_AREA_RATIO = 0.9;
 const SAMPLE_PDF_CANDIDATES = [
@@ -744,23 +742,23 @@ function instrumentContext(ctx, info) {
     return canvasArea > 0 && deviceArea / canvasArea >= PAGE_BACKGROUND_AREA_RATIO;
   };
 
-  const shouldRecolorThinWhiteStroke = (userBox) => {
+  const strokeRecolorOptions = () => ({
+    pageArea: (info.viewport.width / info.outputScale)
+      * (info.viewport.height / info.outputScale),
+    pageWidth: info.viewport.width / info.outputScale,
+    pageHeight: info.viewport.height / info.outputScale,
+  });
+
+  const shouldRecolorWhiteStroke = (userBox) => {
     if (!state.recolorText || !shouldRecolorNearWhite("strokeStyle")) {
-      return false;
-    }
-    if (ctx.lineWidth > MAX_SYMBOL_STROKE_LINE_WIDTH) {
       return false;
     }
     const device = transformBox(userBox, ctx.getTransform());
     if (!device || isPageBackgroundDevice(device)) {
       return false;
     }
-    const cssBox = cssBoxFromDevice(device);
-    if (cssBox.w * cssBox.h >= MAX_SYMBOL_STROKE_CSS_AREA) {
-      return false;
-    }
     const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
-    return isWhiteSymbolShape(pdfBBox, cssBox);
+    return shouldRecolorNearWhiteStroke(pdfBBox, ctx.lineWidth, strokeRecolorOptions());
   };
 
   const handleCover = (userBox, drawOriginal, styleProp = "fillStyle") => {
@@ -785,10 +783,6 @@ function instrumentContext(ctx, info) {
     }
 
     if (isWhiteSymbolShape(pdfBBox, cssBox)) {
-      if (state.recolorText) {
-        drawWithNearWhiteRecolor(styleProp, drawOriginal);
-        return;
-      }
       drawOriginal();
       return;
     }
@@ -849,14 +843,10 @@ function instrumentContext(ctx, info) {
     const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
     const source = pathArg ? pathArg.__bbox : bbox;
     if (!Number.isFinite(source.minX)) {
-      if (state.recolorText && shouldRecolorNearWhite("strokeStyle")) {
-        drawWithNearWhiteRecolor("strokeStyle", () => orig.stroke(...args));
-        return;
-      }
       return orig.stroke(...args);
     }
     const userBox = { ...source };
-    if (shouldRecolorThinWhiteStroke(userBox)) {
+    if (shouldRecolorWhiteStroke(userBox)) {
       drawWithNearWhiteRecolor("strokeStyle", () => orig.stroke(...args));
       return;
     }
@@ -870,7 +860,7 @@ function instrumentContext(ctx, info) {
       maxX: Math.max(x, x + w),
       maxY: Math.max(y, y + h),
     };
-    if (shouldRecolorThinWhiteStroke(userBox)) {
+    if (shouldRecolorWhiteStroke(userBox)) {
       drawWithNearWhiteRecolor("strokeStyle", () => orig.strokeRect(x, y, w, h));
       return;
     }
