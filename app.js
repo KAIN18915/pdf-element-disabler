@@ -1,8 +1,8 @@
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
+import * as pdfLib from "./pdf-lib-shim.js";
 import { makeCoverKey, transformPdfContent } from "./pdf-content-transform.js";
 const EXPORT_RENDER_SCALE = 2;
 const PDFJS_DIST_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624";
-const PDF_LIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js";
 const SAMPLE_PDF_CANDIDATES = [
   { url: "./main.pdf", name: "main.pdf" },
   {
@@ -15,7 +15,7 @@ let pdfLibPromise = null;
 
 function loadPdfLib() {
   if (!pdfLibPromise) {
-    pdfLibPromise = import(PDF_LIB_URL);
+    pdfLibPromise = Promise.resolve(pdfLib);
   }
   return pdfLibPromise;
 }
@@ -197,11 +197,14 @@ async function loadPdf(source, name, options = {}) {
       }
       const buffer = await response.arrayBuffer();
       pdfBytes = new Uint8Array(buffer);
-      documentSource = pdfBytes;
     } else {
-      pdfBytes = source instanceof Uint8Array ? source : new Uint8Array(source);
-      documentSource = pdfBytes;
+      pdfBytes = source instanceof Uint8Array ? new Uint8Array(source) : new Uint8Array(source);
     }
+
+    // PDF.js may transfer the ArrayBuffer to its worker and detach it.
+    // Keep an independent copy for vector export and PDF merge.
+    const exportBytes = pdfBytes.slice();
+    documentSource = pdfBytes;
 
     const loadingTask = pdfjsLib.getDocument(buildPdfDocumentOptions(documentSource));
     const pdfDoc = await loadingTask.promise;
@@ -210,7 +213,7 @@ async function loadPdf(source, name, options = {}) {
     }
 
     state.pdfDoc = pdfDoc;
-    state.pdfBytes = pdfBytes;
+    state.pdfBytes = exportBytes;
     await renderDocument();
     return true;
   } catch (error) {
