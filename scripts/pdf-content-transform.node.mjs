@@ -484,14 +484,30 @@ function transformContentBytes(bytes, options) {
     }
 
     if (token === "re") {
+      if (index >= 4) {
+        state.pathOutputStart = output.length - 4;
+      }
       const removal = tryRemoveRevealedCoverRectFill(tokens, index, state, options);
       if (removal) {
         index = removal.nextIndex;
         continue;
       }
+    } else if (token === "m") {
+      if (index >= 2) {
+        state.pathOutputStart = output.length - 2;
+      } else {
+        state.pathOutputStart = output.length;
+      }
     }
 
     if (isOperator(token)) {
+      if (PURE_FILL_OPERATORS.has(token) && tryRemoveRevealedCoverPathFill(state, options)) {
+        output.length = state.pathOutputStart ?? output.length;
+        clearPathState(state);
+        index += 1;
+        continue;
+      }
+
       if (token === "Do" && options.recolorText && options.formResolver) {
         const formInfo = options.formResolver(tokens[index - 1]);
         if (formInfo) {
@@ -555,6 +571,7 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     pathOps: 0,
     rectCount: 0,
     hasCurve: false,
+    pathOutputStart: 0,
   };
 }
 
@@ -773,6 +790,15 @@ function tryRemoveRevealedCoverRectFill(tokens, reIndex, state, options) {
       continue;
     }
 
+    if (token === "sc" || token === "scn") {
+      const colorInfo = readColorFromOperator(tokens, cursor, token, state.fillColorSpace);
+      if (colorInfo.kind !== "unknown") {
+        fillColor = colorInfo;
+      }
+      cursor += 1;
+      continue;
+    }
+
     if (PURE_FILL_OPERATORS.has(token)) {
       const bbox = rectToBbox(rectArgs[0], rectArgs[1], rectArgs[2], rectArgs[3], state.ctm);
       if (shouldRemoveFill(bbox, fillColor, options)) {
@@ -791,8 +817,17 @@ function tryRemoveRevealedCoverRectFill(tokens, reIndex, state, options) {
   return null;
 }
 
+function tryRemoveRevealedCoverPathFill(state, options) {
+  const pathInfo = getPaintPathInfo(state);
+  return shouldRemoveFill(pathInfo.bbox, state.fillColor, options);
+}
+
 function shouldRemoveFill(bbox, fillColor, options) {
   if (!bbox || !fillColor || fillColor.kind === "unknown") {
+    return false;
+  }
+
+  if (!Number.isFinite(bbox.w) || !Number.isFinite(bbox.h) || bbox.w <= 0 || bbox.h <= 0) {
     return false;
   }
 
@@ -804,10 +839,6 @@ function shouldRemoveFill(bbox, fillColor, options) {
   const area = bbox.w * bbox.h;
   const pageArea = options.pageArea ?? 0;
   if (pageArea > 0 && area / pageArea >= 0.9) {
-    return false;
-  }
-
-  if (bbox.w < 3 || bbox.h < 3) {
     return false;
   }
 
@@ -1762,6 +1793,7 @@ function cloneGraphicsState(state) {
     pathOps: state.pathOps ?? 0,
     rectCount: state.rectCount ?? 0,
     hasCurve: Boolean(state.hasCurve),
+    pathOutputStart: state.pathOutputStart ?? 0,
   };
 }
 
@@ -1778,6 +1810,7 @@ function restoreGraphicsState(state, saved) {
   state.pathOps = saved.pathOps ?? 0;
   state.rectCount = saved.rectCount ?? 0;
   state.hasCurve = Boolean(saved.hasCurve);
+  state.pathOutputStart = saved.pathOutputStart ?? 0;
 }
 
 function normalizeColor(color) {
@@ -1813,6 +1846,7 @@ export const __test__ = {
   tokenizeContentStream,
   transformContentBytes,
   tryRemoveRevealedCoverRectFill,
+  tryRemoveRevealedCoverPathFill,
   tryPushRecoloredColorOperator,
   tryInjectRecolorBeforePaint,
   makeCoverKey,

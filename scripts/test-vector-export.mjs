@@ -367,6 +367,109 @@ async function testSmallNestedCoverRemoval() {
   console.log("OK: small nested white cover rects remove independently");
 }
 
+async function testThinInheritedCoverRemoval() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: false,
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const bytes = new TextEncoder().encode(
+    "1 1 1 rg 209.2 222.4879 8 1 re f* q BT /F1 12 Tf 110 615 Td (Hi) Tj ET Q\n",
+  );
+  const key = makeCoverKey(1, { x: 209.2, y: 222.5, w: 8, h: 1 });
+
+  const removed = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([key]),
+  });
+  const removedText = new TextDecoder("latin1").decode(removed);
+  if (removedText.includes("209.2 222.4879 8 1 re")) {
+    throw new Error("Thin inherited-color cover was not removed");
+  }
+  if (!removedText.includes("Tj")) {
+    throw new Error("Text operator lost when removing thin inherited cover");
+  }
+
+  console.log("OK: thin re f* covers with inherited sc color remove when revealed");
+}
+
+async function testPathBasedCoverRemoval() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: false,
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const bytes = new TextEncoder().encode(
+    "1 1 1 rg 100 600 m 300 600 l 300 640 l 100 640 l h f 72 720 Td (Hi) Tj\n",
+  );
+  const key = makeCoverKey(1, { x: 100, y: 600, w: 200, h: 40 });
+
+  const removed = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([key]),
+  });
+  const removedText = new TextDecoder("latin1").decode(removed);
+  if (removedText.includes(" 600 m ") || removedText.includes(" h f")) {
+    throw new Error("Path-based white cover was not removed");
+  }
+  if (!removedText.includes("Tj")) {
+    throw new Error("Text operator lost during path-based cover removal");
+  }
+
+  console.log("OK: path-based white cover fills remove when revealed");
+}
+
+async function testNestedPathAndRectCoverRemoval() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: false,
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const bytes = new TextEncoder().encode(
+    "1 1 1 rg 100 600 m 300 600 l 300 640 l 100 640 l h f 150 610 30 20 re 1 1 1 rg f\n",
+  );
+  const largeKey = makeCoverKey(1, { x: 100, y: 600, w: 200, h: 40 });
+  const smallKey = makeCoverKey(1, { x: 150, y: 610, w: 30, h: 20 });
+
+  const removeSmallOnly = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([smallKey]),
+  });
+  const removeSmallText = new TextDecoder("latin1").decode(removeSmallOnly);
+  if (!removeSmallText.includes("100 600 m")) {
+    throw new Error("Large path cover removed when only nested rect cover was revealed");
+  }
+  if (removeSmallText.includes("150 610 30 20 re")) {
+    throw new Error("Revealed nested rect cover on path cover was not removed");
+  }
+
+  const removeBoth = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([largeKey, smallKey]),
+  });
+  const removeBothText = new TextDecoder("latin1").decode(removeBoth);
+  if (removeBothText.includes(" h f") || removeBothText.includes("150 610 30 20 re")) {
+    throw new Error("Revealed nested path and rect covers were not both removed");
+  }
+
+  console.log("OK: nested path and rect covers remove independently");
+}
+
 async function testRecolorOperators() {
   const options = { textColor: "#dd1133", whiteThreshold: 238 };
   const output = [];
@@ -879,6 +982,9 @@ async function main() {
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
   await testSmallNestedCoverRemoval();
+  await testThinInheritedCoverRemoval();
+  await testPathBasedCoverRemoval();
+  await testNestedPathAndRectCoverRemoval();
 
   const sampleBytes = await makeSamplePdf();
   writeFileSync("scripts/sample-test.pdf", sampleBytes);
@@ -897,6 +1003,7 @@ async function main() {
   await testVectorExport("Recolor text", sampleBytes, {
     recolorText: true,
     revealedCovers: new Set([coverKey]),
+    allowCoverRemoval: true,
   });
 
   await testVectorExport("Text edit on page 1", sampleBytes, {
