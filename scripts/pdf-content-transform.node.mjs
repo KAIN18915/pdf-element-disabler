@@ -1171,7 +1171,7 @@ export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
     return true;
   }
 
-  if (pathInfo.hasCurve && pathInfo.pathOps >= 3 && !isWhiteCoverRect(bbox, options)) {
+  if (pathInfo.hasCurve && pathInfo.pathOps >= 3) {
     return true;
   }
 
