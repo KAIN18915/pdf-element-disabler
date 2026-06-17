@@ -25,6 +25,9 @@ const IMAGE_RESIZE_CORNERS = ["nw", "ne", "sw", "se"];
 const DEFAULT_NEW_TEXT_SIZE = 12;
 // 小さな白塗り/白線（括弧など）は被せ物ではなく隠し文字として扱う。
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
+// 白ストローク（括弧・分数線）は塗りより明るさ判定を緩めて拾う。
+const STROKE_WHITE_THRESHOLD_CAP = 220;
+const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const SAMPLE_PDF_CANDIDATES = [
   { url: "./main.pdf", name: "main.pdf" },
   {
@@ -563,6 +566,7 @@ async function downloadModifiedPdfVector() {
     const revealedCovers = buildRevealedCoversForExport();
     const transformOptions = {
       whiteThreshold: state.whiteThreshold,
+      strokeWhiteThreshold: Math.min(state.whiteThreshold, STROKE_WHITE_THRESHOLD_CAP),
       revealedCovers,
       recolorText: state.recolorText,
       textColor: state.textColor,
@@ -692,10 +696,15 @@ function instrumentContext(ctx, info) {
     return orig.ellipse(x, y, rx, ry, ...rest);
   };
 
+  const recolorThresholdFor = (styleProp) =>
+    styleProp === "strokeStyle"
+      ? Math.min(state.whiteThreshold, STROKE_WHITE_THRESHOLD_CAP)
+      : state.whiteThreshold;
+
   // 被せ物候補かどうか判定し、必要なら描画をスキップする共通処理。
-  const shouldRecolorNearWhite = (styleProp) => {
+  const shouldRecolorNearWhite = (styleProp, threshold = recolorThresholdFor(styleProp)) => {
     const color = parseColor(ctx[styleProp]);
-    return Boolean(color && isNearWhite(color, state.whiteThreshold));
+    return Boolean(color && isNearWhite(color, threshold));
   };
 
   const drawWithNearWhiteRecolor = (styleProp, drawOriginal) => {
@@ -712,9 +721,25 @@ function instrumentContext(ctx, info) {
   const isSmallWhiteContent = (pdfBBox) =>
     pdfBBox.w * pdfBBox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
 
+  const cssBoxFromDevice = (device) => ({
+    w: device.w / info.outputScale,
+    h: device.h / info.outputScale,
+  });
+
+  const isThinWhiteBar = (cssBox) => cssBox.w < 3 || cssBox.h < 3;
+
+  const isLinearWhiteSymbol = (cssBox) => {
+    const minDim = Math.min(cssBox.w, cssBox.h);
+    const maxDim = Math.max(cssBox.w, cssBox.h);
+    return minDim > 0 && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO;
+  };
+
+  const shouldRecolorWhiteSymbolFill = (pdfBBox, cssBox) =>
+    isSmallWhiteContent(pdfBBox) || isThinWhiteBar(cssBox) || isLinearWhiteSymbol(cssBox);
+
   const handleCover = (userBox, drawOriginal, styleProp = "fillStyle") => {
     const color = parseColor(ctx[styleProp]);
-    if (!color || !isNearWhite(color, state.whiteThreshold)) {
+    if (!color || !isNearWhite(color, recolorThresholdFor(styleProp))) {
       drawOriginal();
       return;
     }
@@ -726,6 +751,12 @@ function instrumentContext(ctx, info) {
     }
 
     const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+    const cssBox = cssBoxFromDevice(device);
+    if (state.recolorText && shouldRecolorWhiteSymbolFill(pdfBBox, cssBox)) {
+      drawWithNearWhiteRecolor(styleProp, drawOriginal);
+      return;
+    }
+
     if (isSmallWhiteContent(pdfBBox)) {
       drawWithNearWhiteRecolor(styleProp, drawOriginal);
       return;
@@ -738,9 +769,7 @@ function instrumentContext(ctx, info) {
       return;
     }
 
-    const cssW = device.w / info.outputScale;
-    const cssH = device.h / info.outputScale;
-    if (cssW < 3 || cssH < 3) {
+    if (isThinWhiteBar(cssBox)) {
       drawWithNearWhiteRecolor(styleProp, drawOriginal);
       return;
     }
@@ -753,8 +782,8 @@ function instrumentContext(ctx, info) {
       revealed,
       x: device.x / info.outputScale,
       y: device.y / info.outputScale,
-      w: cssW,
-      h: cssH,
+      w: cssBox.w,
+      h: cssBox.h,
     });
 
     if (!revealed) {
@@ -782,9 +811,18 @@ function instrumentContext(ctx, info) {
     const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
     const source = pathArg ? pathArg.__bbox : bbox;
     if (!Number.isFinite(source.minX)) {
+      if (state.recolorText) {
+        drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
+        return;
+      }
       return orig.fill(...args);
     }
     const userBox = { ...source };
+    // 複雑パス（括弧など）の白塗りは被せ物ではなく記号として扱う。
+    if (state.recolorText && pathArg) {
+      drawWithNearWhiteRecolor("fillStyle", () => orig.fill(...args));
+      return;
+    }
     handleCover(userBox, () => orig.fill(...args));
   };
 
@@ -818,6 +856,10 @@ function instrumentContext(ctx, info) {
     const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
     const source = pathArg ? pathArg.__bbox : bbox;
     if (!Number.isFinite(source.minX)) {
+      if (state.recolorText) {
+        drawWithNearWhiteRecolor("strokeStyle", () => orig.stroke(...args));
+        return;
+      }
       return orig.stroke(...args);
     }
     const userBox = { ...source };

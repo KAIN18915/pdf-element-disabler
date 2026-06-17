@@ -13,6 +13,8 @@ const {
   tryPushRecoloredColorOperator,
 } = __test__;
 
+const TARGET_RGB = "0.867 0.067 0.2";
+
 function countOperators(tokens) {
   const counts = new Map();
   for (const token of tokens) {
@@ -334,8 +336,64 @@ async function testRecolorOperators() {
   console.log("OK: stroke/fill color operators recolored without duplicate operands");
 }
 
+async function testPathStrokeAndThinFillRecolor() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const strokeStream = transformContentBytes(
+    new TextEncoder().encode("0.92 G 0 0 m 10 0 l S\n"),
+    baseOptions,
+  );
+  const strokeText = new TextDecoder("latin1").decode(strokeStream);
+  if (!strokeText.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Expected near-white path stroke to be recolored: ${strokeText}`);
+  }
+  if (strokeText.includes("0.92 G")) {
+    throw new Error(`Near-white G operator should be rewritten: ${strokeText}`);
+  }
+
+  const bracketStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 RG 0 0 m 0 0 l 0 50 l S\n"),
+    baseOptions,
+  );
+  const bracketText = new TextDecoder("latin1").decode(bracketStream);
+  if (!bracketText.includes(`${TARGET_RGB} RG`)) {
+    throw new Error(`Expected white bracket stroke to be recolored: ${bracketText}`);
+  }
+
+  const fractionStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 10 10 100 1 re f\n"),
+    baseOptions,
+  );
+  const fractionText = new TextDecoder("latin1").decode(fractionStream);
+  if (!fractionText.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`Expected thin white fraction bar fill to be recolored: ${fractionText}`);
+  }
+
+  const coverStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 100 600 200 40 re f\n"),
+    baseOptions,
+  );
+  const coverText = new TextDecoder("latin1").decode(coverStream);
+  if (!coverText.includes("1 1 1 rg") || !coverText.includes(" re f")) {
+    throw new Error(`Large white cover rect should remain untouched: ${coverText}`);
+  }
+
+  console.log("OK: path strokes and thin fills recolored without touching cover rects");
+}
+
 async function main() {
   await testRecolorOperators();
+  await testPathStrokeAndThinFillRecolor();
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
 

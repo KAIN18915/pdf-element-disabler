@@ -83,8 +83,13 @@ const OPERATORS = new Set([
 
 const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
+const STROKE_WHITE_THRESHOLD_CAP = 220;
+const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K"]);
+const STROKE_PAINT_OPERATORS = new Set(["S", "s"]);
+const FILL_PAINT_OPERATORS = new Set(["f", "F", "f*"]);
+const BOTH_PAINT_OPERATORS = new Set(["B", "B*", "b", "b*"]);
 
 export function needsContentStreamTransform(options) {
   if (options.recolorText) {
@@ -301,7 +306,11 @@ function transformContentBytes(bytes, options) {
     }
 
     if (isOperator(token)) {
-      if (options.recolorText && tryPushRecoloredColorOperator(tokens, index, token, options, output)) {
+      if (options.recolorText && tryInjectRecolorBeforePaint(tokens, index, token, state, options, output)) {
+        index += 1;
+        continue;
+      }
+      if (options.recolorText && tryPushRecoloredColorOperator(tokens, index, token, options, output, state)) {
         index += 1;
         continue;
       }
@@ -322,6 +331,8 @@ function createGraphicsState(pageWidth, pageHeight) {
     ctm: identityMatrix(),
     stack: [],
     fillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
+    strokeColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
+    lastRect: null,
   };
 }
 
@@ -351,9 +362,21 @@ function updateGraphicsState(tokens, index, state, token) {
     return;
   }
 
+  if (token === "RG") {
+    const args = readNumberArgs(tokens, index, 3);
+    state.strokeColor = { kind: "rgb", r: args[0], g: args[1], b: args[2] };
+    return;
+  }
+
   if (token === "g") {
     const gray = readNumberArgs(tokens, index, 1)[0];
     state.fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
+    return;
+  }
+
+  if (token === "G") {
+    const gray = readNumberArgs(tokens, index, 1)[0];
+    state.strokeColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
     return;
   }
 
@@ -367,8 +390,33 @@ function updateGraphicsState(tokens, index, state, token) {
     return;
   }
 
+  if (token === "K") {
+    const args = readNumberArgs(tokens, index, 4);
+    const [c, m, y, kVal] = args;
+    const r = (1 - c) * (1 - kVal);
+    const g = (1 - m) * (1 - kVal);
+    const b = (1 - y) * (1 - kVal);
+    state.strokeColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
+    return;
+  }
+
+  if (token === "re") {
+    const args = readNumberArgs(tokens, index, 4);
+    state.lastRect = rectToBbox(args[0], args[1], args[2], args[3], state.ctm);
+    return;
+  }
+
+  if (token === "m" || token === "h") {
+    state.lastRect = null;
+    return;
+  }
+
   if (token === "gs" || token === "cs" || token === "CS" || token === "sc" || token === "scn" || token === "SC" || token === "SCN") {
     state.fillColor = { kind: "unknown" };
+  }
+
+  if (token === "gs" || token === "CS" || token === "SC" || token === "SCN") {
+    state.strokeColor = { kind: "unknown" };
   }
 }
 
@@ -464,7 +512,7 @@ function recolorTextBlock(blockTokens, options, outerState) {
 
   for (let index = 0; index < blockTokens.length; index += 1) {
     const token = blockTokens[index];
-    if (tryPushRecoloredColorOperator(blockTokens, index, token, options, output)) {
+    if (tryPushRecoloredColorOperator(blockTokens, index, token, options, output, outerState, { allowFillRecolor: true })) {
       continue;
     }
     output.push(token);
@@ -473,14 +521,124 @@ function recolorTextBlock(blockTokens, options, outerState) {
   return output;
 }
 
-function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, output) {
+function getFillThreshold(options) {
+  return options.whiteThreshold ?? 238;
+}
+
+function getStrokeThreshold(options) {
+  const fillThreshold = getFillThreshold(options);
+  if (options.strokeWhiteThreshold != null) {
+    return Math.min(fillThreshold, options.strokeWhiteThreshold);
+  }
+  return Math.min(fillThreshold, STROKE_WHITE_THRESHOLD_CAP);
+}
+
+function isNearWhiteColor(color, threshold) {
+  if (!color || color.kind === "unknown") {
+    return false;
+  }
+  const { r, g, b } = normalizeColor(color);
+  return isNearWhite(r, g, b, threshold);
+}
+
+function pushTargetColor(output, options, operator) {
+  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+  output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), operator);
+}
+
+function applyRecoloredColorToState(state, operator, options) {
+  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+  const color = { kind: "rgb", r: target[0], g: target[1], b: target[2] };
+  if (STROKE_COLOR_OPERATORS.has(operator)) {
+    state.strokeColor = color;
+    return;
+  }
+  state.fillColor = color;
+}
+
+function isLinearWhiteRect(rect) {
+  const minDim = Math.min(rect.w, rect.h);
+  const maxDim = Math.max(rect.w, rect.h);
+  return minDim > 0 && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO;
+}
+
+function shouldRecolorFillAtPaint(state, options) {
+  const fillThreshold = getFillThreshold(options);
+  if (!isNearWhiteColor(state.fillColor, fillThreshold)) {
+    return false;
+  }
+
+  const rect = state.lastRect;
+  if (!rect) {
+    return true;
+  }
+
+  const area = rect.w * rect.h;
+  const pageArea = options.pageArea ?? 0;
+  if (pageArea > 0 && area / pageArea >= 0.9) {
+    return false;
+  }
+
+  const minDim = Math.min(rect.w, rect.h);
+  if (minDim < 3) {
+    return true;
+  }
+  if (area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
+    return true;
+  }
+  if (isLinearWhiteRect(rect)) {
+    return true;
+  }
+
+  return false;
+}
+
+function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
+  if (!STROKE_PAINT_OPERATORS.has(token)
+    && !FILL_PAINT_OPERATORS.has(token)
+    && !BOTH_PAINT_OPERATORS.has(token)) {
+    return false;
+  }
+
+  const needsStroke = STROKE_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token);
+  const needsFill = FILL_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token);
+  let injected = false;
+
+  if (needsStroke && isNearWhiteColor(state.strokeColor, getStrokeThreshold(options))) {
+    pushTargetColor(output, options, "RG");
+    applyRecoloredColorToState(state, "RG", options);
+    injected = true;
+  }
+
+  if (needsFill && shouldRecolorFillAtPaint(state, options)) {
+    pushTargetColor(output, options, "rg");
+    applyRecoloredColorToState(state, "rg", options);
+    injected = true;
+  }
+
+  if (!injected) {
+    return false;
+  }
+
+  output.push(token);
+  if (FILL_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token)) {
+    state.lastRect = null;
+  }
+  return true;
+}
+
+function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, output, state = null, recolorOptions = {}) {
+  const allowFillRecolor = recolorOptions.allowFillRecolor ?? false;
   if (!FILL_COLOR_OPERATORS.has(token) && !STROKE_COLOR_OPERATORS.has(token)) {
     return false;
   }
 
   const target = hexToPdfRgb(options.textColor ?? "#dd1133");
-  const threshold = options.whiteThreshold ?? 238;
   const isStroke = STROKE_COLOR_OPERATORS.has(token);
+  if (!isStroke && !allowFillRecolor) {
+    return false;
+  }
+  const threshold = isStroke ? getStrokeThreshold(options) : getFillThreshold(options);
 
   if (token === "rg" || token === "RG") {
     const args = readNumberArgs(tokens, operatorIndex, 3);
@@ -489,6 +647,9 @@ function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, ou
     }
     const outOp = isStroke ? "RG" : "rg";
     output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), outOp);
+    if (state) {
+      applyRecoloredColorToState(state, token, options);
+    }
     return true;
   }
 
@@ -503,6 +664,9 @@ function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, ou
       formatNumber(target[2]),
       isStroke ? "RG" : "rg",
     );
+    if (state) {
+      applyRecoloredColorToState(state, token, options);
+    }
     return true;
   }
 
@@ -521,6 +685,9 @@ function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, ou
       formatNumber(target[2]),
       isStroke ? "RG" : "rg",
     );
+    if (state) {
+      applyRecoloredColorToState(state, token, options);
+    }
     return true;
   }
 
@@ -829,12 +996,16 @@ function cloneGraphicsState(state) {
     ctm: { ...state.ctm },
     stack: [],
     fillColor: { ...state.fillColor },
+    strokeColor: { ...state.strokeColor },
+    lastRect: state.lastRect ? { ...state.lastRect } : null,
   };
 }
 
 function restoreGraphicsState(state, saved) {
   state.ctm = saved.ctm;
   state.fillColor = saved.fillColor;
+  state.strokeColor = saved.strokeColor;
+  state.lastRect = saved.lastRect;
 }
 
 function normalizeColor(color) {
@@ -871,6 +1042,7 @@ export const __test__ = {
   transformContentBytes,
   tryRemoveRevealedCoverRectFill,
   tryPushRecoloredColorOperator,
+  tryInjectRecolorBeforePaint,
   makeCoverKey,
   needsContentStreamTransform,
 };
