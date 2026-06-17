@@ -3,9 +3,11 @@ import {
   buildMockTextEntry,
   getFontAscentRatio,
   getTextItemPdfBBox,
+  getTextLayerCssBox,
   getTextSpaceDescent,
   getTextSpansForPage,
   mergeTextItemsIntoSpans,
+  pdfBBoxToCssBox,
 } from "../text-span-utils.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -40,6 +42,50 @@ function assert(condition, message) {
   }
 }
 
+function testNegativeScalePdfBBoxWrapsBaseline() {
+  const item = {
+    str: "Hello",
+    transform: [12, 0, 0, -12, 100, 700],
+    width: 33,
+  };
+  const bbox = getTextItemPdfBBox(item);
+  assert(bbox.y < item.transform[5], "bbox bottom should sit below baseline in PDF Y-up space");
+  assert(
+    bbox.y + bbox.h > item.transform[5],
+    "bbox top should sit above baseline in PDF Y-up space",
+  );
+}
+
+function testNegativeScaleCssAlignment() {
+  const item = {
+    str: "Hello",
+    transform: [12, 0, 0, -12, 100, 700],
+    width: 33,
+  };
+  const viewport = {
+    scale: 1.5,
+    rawDims: { pageX: 0, pageY: 0, pageWidth: 612, pageHeight: 792 },
+    convertToViewportPoint(x, y) {
+      return [x * this.scale, (792 - y) * this.scale];
+    },
+  };
+  const bbox = getTextItemPdfBBox(item);
+  const cssBox = pdfBBoxToCssBox(bbox, viewport);
+  const expected = getTextLayerCssBox(item, {}, viewport);
+  assert(
+    Math.abs(cssBox.y - expected.y) < 0.05,
+    `Top should match PDF.js TextLayer (got=${cssBox.y.toFixed(2)} expected=${expected.y.toFixed(2)})`,
+  );
+  assert(
+    Math.abs(cssBox.h - expected.h) < 0.05,
+    `Height should match PDF.js TextLayer (got=${cssBox.h.toFixed(2)} expected=${expected.h.toFixed(2)})`,
+  );
+  assert(
+    cssBox.w < expected.w,
+    `Width should trim trailing advance (got=${cssBox.w.toFixed(2)} textLayer=${expected.w.toFixed(2)})`,
+  );
+}
+
 function testSingleItemBboxRatio() {
   const item = {
     str: "Hello",
@@ -49,7 +95,7 @@ function testSingleItemBboxRatio() {
   const bbox = getTextItemPdfBBox(item);
   const ratio = bbox.w / Math.max(bbox.h, 0.01);
   assert(ratio > 1, `Single horizontal text should be wider than tall (ratio=${ratio.toFixed(2)})`);
-  assert(bbox.h <= 12, `Default bbox height should not exceed 1em (h=${bbox.h.toFixed(2)})`);
+  assert(bbox.h <= 12 + 0.01, `Default bbox height should not exceed 1em (h=${bbox.h.toFixed(2)})`);
 }
 
 function testStyleDescentTightensHeight() {
@@ -58,13 +104,13 @@ function testStyleDescentTightensHeight() {
     transform: [14, 0, 0, -14, 100, 700],
     width: 72.338,
   };
-  const looseStyle = { ascent: 0.718 };
+  const fullEmStyle = { ascent: 0.718, descent: -(1 - 0.718) };
   const tightStyle = { ascent: 0.718, descent: -0.207 };
-  const loose = getTextItemPdfBBox(item, looseStyle);
+  const fullEm = getTextItemPdfBBox(item, fullEmStyle);
   const tight = getTextItemPdfBBox(item, tightStyle);
   assert(
-    tight.h < loose.h,
-    `style.descent should shorten bbox (tight=${tight.h.toFixed(2)} loose=${loose.h.toFixed(2)})`,
+    tight.h < fullEm.h,
+    `style.descent should shorten bbox vs full em (tight=${tight.h.toFixed(2)} fullEm=${fullEm.h.toFixed(2)})`,
   );
   assert(
     Math.abs(tight.h - 14 * (0.718 + 0.207)) < 0.2,
@@ -243,6 +289,8 @@ function testInlineMathMerge() {
 }
 
 async function main() {
+  testNegativeScalePdfBBoxWrapsBaseline();
+  testNegativeScaleCssAlignment();
   testSingleItemBboxRatio();
   testStyleDescentTightensHeight();
   testHorizontalTrim();
