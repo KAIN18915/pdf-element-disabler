@@ -10,6 +10,7 @@ import {
 const {
   tokenizeContentStream,
   transformContentBytes,
+  tryPushRecoloredColorOperator,
 } = __test__;
 
 function countOperators(tokens) {
@@ -299,7 +300,42 @@ async function testCoverRemovalOnlyWhenRevealed() {
   console.log("OK: cover removal is strict to revealed keys");
 }
 
+async function testRecolorOperators() {
+  const options = { textColor: "#dd1133", whiteThreshold: 238 };
+  const output = [];
+  const tokens = ["1", "1", "1", "RG", "0", "0", "0", "rg"];
+  let index = 3;
+  if (!tryPushRecoloredColorOperator(tokens, index, "RG", options, output)) {
+    throw new Error("Expected white RG to be recolored");
+  }
+  if (output.length !== 4 || output[3] !== "RG") {
+    throw new Error(`Unexpected RG recolor output: ${output.join(" ")}`);
+  }
+
+  const transformed = transformContentBytes(
+    new TextEncoder().encode("BT 1 1 1 rg 1 1 1 RG (()) Tj ET\n"),
+    {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  });
+  const text = new TextDecoder("latin1").decode(transformed);
+  if (text.includes("1 1 1 rg") || text.includes("1 1 1 RG")) {
+    throw new Error(`Recolored text block still contains near-white operators: ${text}`);
+  }
+  if (!text.includes("Tj")) {
+    throw new Error("Text operator lost during recolor");
+  }
+  console.log("OK: stroke/fill color operators recolored without duplicate operands");
+}
+
 async function main() {
+  await testRecolorOperators();
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
 

@@ -23,6 +23,8 @@ const MAX_EDIT_HISTORY = 50;
 const MIN_IMAGE_SIZE_PT = 8;
 const IMAGE_RESIZE_CORNERS = ["nw", "ne", "sw", "se"];
 const DEFAULT_NEW_TEXT_SIZE = 12;
+// 小さな白塗り/白線（括弧など）は被せ物ではなく隠し文字として扱う。
+const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
 const SAMPLE_PDF_CANDIDATES = [
   { url: "./main.pdf", name: "main.pdf" },
   {
@@ -55,7 +57,7 @@ const state = {
   renderToken: 0,
   // 穴埋め解除の設定
   revealAllOverlays: false,
-  recolorText: false,
+  recolorText: true,
   textColor: "#dd1133",
   // 「白」とみなす最小の明るさ (0-255)。値が小さいほど薄いグレーも対象になる。
   whiteThreshold: 238,
@@ -628,6 +630,7 @@ function instrumentContext(ctx, info) {
     fill: ctx.fill.bind(ctx),
     fillRect: ctx.fillRect.bind(ctx),
     fillText: ctx.fillText.bind(ctx),
+    stroke: ctx.stroke.bind(ctx),
     strokeText: ctx.strokeText.bind(ctx),
   };
 
@@ -690,8 +693,27 @@ function instrumentContext(ctx, info) {
   };
 
   // 被せ物候補かどうか判定し、必要なら描画をスキップする共通処理。
-  const handleCover = (userBox, drawOriginal) => {
-    const color = parseColor(ctx.fillStyle);
+  const shouldRecolorNearWhite = (styleProp) => {
+    const color = parseColor(ctx[styleProp]);
+    return Boolean(color && isNearWhite(color, state.whiteThreshold));
+  };
+
+  const drawWithNearWhiteRecolor = (styleProp, drawOriginal) => {
+    if (!shouldRecolorNearWhite(styleProp)) {
+      drawOriginal();
+      return;
+    }
+    const prev = ctx[styleProp];
+    ctx[styleProp] = state.textColor;
+    drawOriginal();
+    ctx[styleProp] = prev;
+  };
+
+  const isSmallWhiteContent = (pdfBBox) =>
+    pdfBBox.w * pdfBBox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+
+  const handleCover = (userBox, drawOriginal, styleProp = "fillStyle") => {
+    const color = parseColor(ctx[styleProp]);
     if (!color || !isNearWhite(color, state.whiteThreshold)) {
       drawOriginal();
       return;
@@ -700,6 +722,12 @@ function instrumentContext(ctx, info) {
     const device = transformBox(userBox, ctx.getTransform());
     if (!device) {
       drawOriginal();
+      return;
+    }
+
+    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+    if (isSmallWhiteContent(pdfBBox)) {
+      drawWithNearWhiteRecolor(styleProp, drawOriginal);
       return;
     }
 
@@ -713,12 +741,10 @@ function instrumentContext(ctx, info) {
     const cssW = device.w / info.outputScale;
     const cssH = device.h / info.outputScale;
     if (cssW < 3 || cssH < 3) {
-      // 細すぎる線などは対象外。
-      drawOriginal();
+      drawWithNearWhiteRecolor(styleProp, drawOriginal);
       return;
     }
 
-    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
     const key = makeCoverKey(info.pageNumber, pdfBBox);
     const revealed = state.revealAllOverlays || state.revealedCovers.has(key);
 
@@ -734,6 +760,20 @@ function instrumentContext(ctx, info) {
     if (!revealed) {
       drawOriginal();
     }
+  };
+
+  const handleStroke = (userBox, drawOriginal) => {
+    const device = transformBox(userBox, ctx.getTransform());
+    if (!device) {
+      drawOriginal();
+      return;
+    }
+    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+    if (state.recolorText || isSmallWhiteContent(pdfBBox)) {
+      drawWithNearWhiteRecolor("strokeStyle", drawOriginal);
+      return;
+    }
+    drawOriginal();
   };
 
   ctx.fill = (...args) => {
@@ -760,30 +800,28 @@ function instrumentContext(ctx, info) {
 
   ctx.fillText = (...args) => {
     if (state.recolorText) {
-      const color = parseColor(ctx.fillStyle);
-      if (color && isNearWhite(color, state.whiteThreshold)) {
-        const prev = ctx.fillStyle;
-        ctx.fillStyle = state.textColor;
-        const result = orig.fillText(...args);
-        ctx.fillStyle = prev;
-        return result;
-      }
+      drawWithNearWhiteRecolor("fillStyle", () => orig.fillText(...args));
+      return;
     }
     return orig.fillText(...args);
   };
 
   ctx.strokeText = (...args) => {
     if (state.recolorText) {
-      const color = parseColor(ctx.strokeStyle);
-      if (color && isNearWhite(color, state.whiteThreshold)) {
-        const prev = ctx.strokeStyle;
-        ctx.strokeStyle = state.textColor;
-        const result = orig.strokeText(...args);
-        ctx.strokeStyle = prev;
-        return result;
-      }
+      drawWithNearWhiteRecolor("strokeStyle", () => orig.strokeText(...args));
+      return;
     }
     return orig.strokeText(...args);
+  };
+
+  ctx.stroke = (...args) => {
+    const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
+    const source = pathArg ? pathArg.__bbox : bbox;
+    if (!Number.isFinite(source.minX)) {
+      return orig.stroke(...args);
+    }
+    const userBox = { ...source };
+    handleStroke(userBox, () => orig.stroke(...args));
   };
 
   return {
@@ -802,6 +840,7 @@ function instrumentContext(ctx, info) {
         fill: orig.fill,
         fillRect: orig.fillRect,
         fillText: orig.fillText,
+        stroke: orig.stroke,
         strokeText: orig.strokeText,
       });
     },
