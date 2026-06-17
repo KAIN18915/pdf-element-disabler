@@ -84,7 +84,8 @@ const OPERATORS = new Set([
 const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
 const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
 const STROKE_WHITE_THRESHOLD_CAP = 220;
-const LINEAR_SYMBOL_ASPECT_RATIO = 6;
+const MAX_SYMBOL_STROKE_LINE_WIDTH = 2;
+const PAGE_BACKGROUND_AREA_RATIO = 0.9;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
 const TEXT_SHOW_OPERATORS = new Set(["Tj", "TJ", "'", '"']);
@@ -449,6 +450,8 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     fillColorSpace: "DeviceGray",
     strokeColorSpace: "DeviceGray",
     lastRect: null,
+    pathBBox: null,
+    lineWidth: 1,
   };
 }
 
@@ -518,12 +521,59 @@ function updateGraphicsState(tokens, index, state, token) {
 
   if (token === "re") {
     const args = readNumberArgs(tokens, index, 4);
-    state.lastRect = rectToBbox(args[0], args[1], args[2], args[3], state.ctm);
+    const [rx, ry, rw, rh] = args;
+    state.lastRect = rectToBbox(rx, ry, rw, rh, state.ctm);
+    includeRectInPathBBox(state, rx, ry, rw, rh);
     return;
   }
 
-  if (token === "m" || token === "h") {
+  if (token === "m") {
+    resetPathBBox(state);
+    const args = readNumberArgs(tokens, index, 2);
+    includePointInPathBBox(state, args[0], args[1]);
     state.lastRect = null;
+    return;
+  }
+
+  if (token === "l") {
+    const args = readNumberArgs(tokens, index, 2);
+    includePointInPathBBox(state, args[0], args[1]);
+    state.lastRect = null;
+    return;
+  }
+
+  if (token === "c") {
+    const args = readNumberArgs(tokens, index, 6);
+    includePointInPathBBox(state, args[0], args[1]);
+    includePointInPathBBox(state, args[2], args[3]);
+    includePointInPathBBox(state, args[4], args[5]);
+    state.lastRect = null;
+    return;
+  }
+
+  if (token === "v") {
+    const args = readNumberArgs(tokens, index, 4);
+    includePointInPathBBox(state, args[0], args[1]);
+    includePointInPathBBox(state, args[2], args[3]);
+    state.lastRect = null;
+    return;
+  }
+
+  if (token === "y") {
+    const args = readNumberArgs(tokens, index, 4);
+    includePointInPathBBox(state, args[0], args[1]);
+    includePointInPathBBox(state, args[2], args[3]);
+    state.lastRect = null;
+    return;
+  }
+
+  if (token === "h") {
+    state.lastRect = null;
+    return;
+  }
+
+  if (token === "w") {
+    state.lineWidth = readNumberArgs(tokens, index, 1)[0];
     return;
   }
 
@@ -643,9 +693,13 @@ function shouldRemoveFill(bbox, fillColor, options) {
 }
 
 function createTextBlockState(outerState) {
+  const fillColor = cloneColorState(outerState.fillColor);
+  const strokeColor = cloneColorState(outerState.strokeColor ?? { kind: "rgb", r: 0, g: 0, b: 0 });
   return {
-    fillColor: cloneColorState(outerState.fillColor),
-    strokeColor: cloneColorState(outerState.strokeColor ?? { kind: "rgb", r: 0, g: 0, b: 0 }),
+    fillColor,
+    strokeColor,
+    lastKnownFillColor: fillColor.kind !== "unknown" ? fillColor : null,
+    lastKnownStrokeColor: strokeColor.kind !== "unknown" ? strokeColor : null,
     fillColorSpace: outerState.fillColorSpace ?? "DeviceGray",
     strokeColorSpace: outerState.strokeColorSpace ?? "DeviceGray",
     textRenderingMode: 0,
@@ -685,6 +739,14 @@ function recolorTextBlock(blockTokens, options, outerState) {
       continue;
     }
 
+    if (token === "gs") {
+      state.fillColor = { kind: "unknown" };
+      state.strokeColor = { kind: "unknown" };
+      output.push(blockTokens[index - 1], token);
+      index += 1;
+      continue;
+    }
+
     if (TEXT_SHOW_OPERATORS.has(token)) {
       injectRecoloredTextPaint(output, state, options);
       index = emitTextShowOperator(blockTokens, index, token, output);
@@ -715,8 +777,10 @@ function processColorOperatorInBlock(tokens, operatorIndex, token, state, option
     const recolored = { kind: "rgb", r: target[0], g: target[1], b: target[2] };
     if (isStroke) {
       state.strokeColor = recolored;
+      state.lastKnownStrokeColor = recolored;
     } else {
       state.fillColor = recolored;
+      state.lastKnownFillColor = recolored;
     }
     return {
       output: [
@@ -733,8 +797,10 @@ function processColorOperatorInBlock(tokens, operatorIndex, token, state, option
   if (colorInfo.kind !== "unknown") {
     if (isStroke) {
       state.strokeColor = colorInfo;
+      state.lastKnownStrokeColor = colorInfo;
     } else {
       state.fillColor = colorInfo;
+      state.lastKnownFillColor = colorInfo;
     }
   } else if (isStroke) {
     state.strokeColor = { kind: "unknown" };
@@ -748,20 +814,40 @@ function processColorOperatorInBlock(tokens, operatorIndex, token, state, option
   };
 }
 
+function effectiveTextFillColor(state) {
+  if (state.fillColor?.kind !== "unknown") {
+    return state.fillColor;
+  }
+  return state.lastKnownFillColor ?? state.fillColor;
+}
+
+function effectiveTextStrokeColor(state) {
+  if (state.strokeColor?.kind !== "unknown") {
+    return state.strokeColor;
+  }
+  return state.lastKnownStrokeColor ?? state.strokeColor;
+}
+
 function injectRecoloredTextPaint(output, state, options) {
   const mode = state.textRenderingMode ?? 0;
   const usesFill = mode === 0 || mode === 2 || mode === 4 || mode === 6;
   const usesStroke = mode === 1 || mode === 2 || mode === 5 || mode === 6;
+  const fillColor = effectiveTextFillColor(state);
+  const strokeColor = effectiveTextStrokeColor(state);
 
-  if (usesFill && shouldRecolorTextPaint(state.fillColor, getFillThreshold(options))) {
+  if (usesFill && shouldRecolorTextPaint(fillColor, getFillThreshold(options))) {
     pushTargetColor(output, options, "rg");
-    state.fillColor = targetColorFromOptions(options);
+    const recolored = targetColorFromOptions(options);
+    state.fillColor = recolored;
+    state.lastKnownFillColor = recolored;
     return;
   }
 
-  if (usesStroke && shouldRecolorTextPaint(state.strokeColor, getStrokeThreshold(options))) {
+  if (usesStroke && shouldRecolorTextPaint(strokeColor, getStrokeThreshold(options))) {
     pushTargetColor(output, options, "RG");
-    state.strokeColor = targetColorFromOptions(options);
+    const recolored = targetColorFromOptions(options);
+    state.strokeColor = recolored;
+    state.lastKnownStrokeColor = recolored;
   }
 }
 
@@ -824,74 +910,140 @@ function applyRecoloredColorToState(state, operator, options) {
   state.fillColor = color;
 }
 
-function isLinearWhiteRect(rect) {
-  const minDim = Math.min(rect.w, rect.h);
-  const maxDim = Math.max(rect.w, rect.h);
-  return minDim > 0 && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO;
+function shouldRecolorStrokeAtPaint(state, options) {
+  if (!isNearWhiteColor(state.strokeColor, getStrokeThreshold(options))) {
+    return false;
+  }
+
+  const lineWidth = state.lineWidth ?? 1;
+  if (lineWidth > MAX_SYMBOL_STROKE_LINE_WIDTH) {
+    return false;
+  }
+
+  const rect = getPaintBbox(state);
+  if (!rect) {
+    return false;
+  }
+
+  if (isPageBackgroundBbox(rect, options)) {
+    return false;
+  }
+
+  if (isWhiteCoverRect(rect, options)) {
+    return false;
+  }
+
+  return rect.w * rect.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
 }
 
-function shouldRecolorFillAtPaint(state, options) {
-  const fillThreshold = getFillThreshold(options);
-  if (!isNearWhiteColor(state.fillColor, fillThreshold)) {
+function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
+  if (!STROKE_PAINT_OPERATORS.has(token)) {
     return false;
   }
 
-  const rect = state.lastRect;
-  if (!rect) {
-    return true;
+  if (!shouldRecolorStrokeAtPaint(state, options)) {
+    return false;
   }
 
-  const area = rect.w * rect.h;
+  pushTargetColor(output, options, "RG");
+  applyRecoloredColorToState(state, "RG", options);
+  output.push(token);
+  state.lastRect = null;
+  state.pathBBox = null;
+  return true;
+}
+
+function newPathBBox() {
+  return {
+    minX: Infinity,
+    minY: Infinity,
+    maxX: -Infinity,
+    maxY: -Infinity,
+  };
+}
+
+function resetPathBBox(state) {
+  state.pathBBox = newPathBBox();
+}
+
+function includePointInPathBBox(state, x, y) {
+  if (!state.pathBBox) {
+    resetPathBBox(state);
+  }
+  const point = applyMatrix(state.ctm, x, y);
+  const bbox = state.pathBBox;
+  bbox.minX = Math.min(bbox.minX, point.x);
+  bbox.minY = Math.min(bbox.minY, point.y);
+  bbox.maxX = Math.max(bbox.maxX, point.x);
+  bbox.maxY = Math.max(bbox.maxY, point.y);
+}
+
+function includeRectInPathBBox(state, x, y, w, h) {
+  includePointInPathBBox(state, x, y);
+  includePointInPathBBox(state, x + w, y);
+  includePointInPathBBox(state, x, y + h);
+  includePointInPathBBox(state, x + w, y + h);
+}
+
+function pathBBoxToRect(bbox) {
+  if (!bbox || !Number.isFinite(bbox.minX)) {
+    return null;
+  }
+  return {
+    x: bbox.minX,
+    y: bbox.minY,
+    w: bbox.maxX - bbox.minX,
+    h: bbox.maxY - bbox.minY,
+  };
+}
+
+function getPaintBbox(state) {
+  if (state.lastRect) {
+    return state.lastRect;
+  }
+  return pathBBoxToRect(state.pathBBox);
+}
+
+function isPageBackgroundBbox(bbox, options) {
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
+    return false;
+  }
+
+  const area = bbox.w * bbox.h;
   const pageArea = options.pageArea ?? 0;
-  if (pageArea > 0 && area / pageArea >= 0.9) {
-    return false;
+  if (pageArea > 0 && area / pageArea >= PAGE_BACKGROUND_AREA_RATIO) {
+    return true;
   }
 
-  const minDim = Math.min(rect.w, rect.h);
-  if (minDim < 3) {
-    return true;
-  }
-  if (area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
-    return true;
-  }
-  if (isLinearWhiteRect(rect)) {
-    return true;
+  const pageWidth = options.pageWidth ?? 0;
+  const pageHeight = options.pageHeight ?? 0;
+  if (pageWidth > 0 && pageHeight > 0) {
+    if (bbox.w >= pageWidth * PAGE_BACKGROUND_AREA_RATIO
+      && bbox.h >= pageHeight * PAGE_BACKGROUND_AREA_RATIO) {
+      return true;
+    }
   }
 
   return false;
 }
 
-function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
-  if (!STROKE_PAINT_OPERATORS.has(token)
-    && !FILL_PAINT_OPERATORS.has(token)
-    && !BOTH_PAINT_OPERATORS.has(token)) {
+function isWhiteCoverRect(bbox, options) {
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
     return false;
   }
 
-  const needsStroke = STROKE_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token);
-  const needsFill = FILL_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token);
-  let injected = false;
-
-  if (needsStroke && isNearWhiteColor(state.strokeColor, getStrokeThreshold(options))) {
-    pushTargetColor(output, options, "RG");
-    applyRecoloredColorToState(state, "RG", options);
-    injected = true;
-  }
-
-  if (needsFill && shouldRecolorFillAtPaint(state, options)) {
-    pushTargetColor(output, options, "rg");
-    applyRecoloredColorToState(state, "rg", options);
-    injected = true;
-  }
-
-  if (!injected) {
+  if (isPageBackgroundBbox(bbox, options)) {
     return false;
   }
 
-  output.push(token);
-  if (FILL_PAINT_OPERATORS.has(token) || BOTH_PAINT_OPERATORS.has(token)) {
-    state.lastRect = null;
+  if (bbox.w < 3 || bbox.h < 3) {
+    return false;
   }
+
+  if (bbox.w * bbox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
+    return false;
+  }
+
   return true;
 }
 
@@ -1346,6 +1498,8 @@ function cloneGraphicsState(state) {
     fillColorSpace: state.fillColorSpace,
     strokeColorSpace: state.strokeColorSpace,
     lastRect: state.lastRect ? { ...state.lastRect } : null,
+    pathBBox: state.pathBBox ? { ...state.pathBBox } : null,
+    lineWidth: state.lineWidth ?? 1,
   };
 }
 
@@ -1356,6 +1510,8 @@ function restoreGraphicsState(state, saved) {
   state.fillColorSpace = saved.fillColorSpace;
   state.strokeColorSpace = saved.strokeColorSpace;
   state.lastRect = saved.lastRect;
+  state.pathBBox = saved.pathBBox;
+  state.lineWidth = saved.lineWidth ?? 1;
 }
 
 function normalizeColor(color) {
@@ -1395,4 +1551,7 @@ export const __test__ = {
   tryInjectRecolorBeforePaint,
   makeCoverKey,
   needsContentStreamTransform,
+  isPageBackgroundBbox,
+  shouldRecolorStrokeAtPaint,
+  createGraphicsState,
 };
