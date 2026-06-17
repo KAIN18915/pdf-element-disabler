@@ -249,12 +249,24 @@ function transformContentBytes(bytes, options) {
   const tokens = tokenizeContentStream(bytes);
   const output = [];
   const state = createGraphicsState(options.pageWidth, options.pageHeight);
+  let operandStart = 0;
 
   for (let index = 0; index < tokens.length; ) {
     const token = tokens[index];
 
+    if (isRawSegment(token)) {
+      flushPathBuffer(output, state);
+      output.push(token);
+      index += 1;
+      operandStart = index;
+      continue;
+    }
+
     if (token === "BT") {
       flushPathBuffer(output, state);
+      if (index > operandStart) {
+        output.push(...tokens.slice(operandStart, index));
+      }
       const blockEnd = findBlockEnd(tokens, index, "BT", "ET");
       const blockTokens = tokens.slice(index, blockEnd + 1);
       if (options.recolorText) {
@@ -263,18 +275,23 @@ function transformContentBytes(bytes, options) {
         output.push(...blockTokens);
       }
       index = blockEnd + 1;
+      operandStart = index;
       continue;
     }
 
     if (isOperator(token)) {
-      const handled = handleGraphicsOperator(tokens, index, output, state, options);
+      const handled = handleGraphicsOperator(tokens, index, output, state, options, operandStart);
       index = handled.nextIndex;
+      operandStart = index;
       continue;
     }
 
-    flushPathBuffer(output, state);
-    output.push(token);
     index += 1;
+  }
+
+  if (operandStart < tokens.length) {
+    flushPathBuffer(output, state);
+    output.push(...tokens.slice(operandStart));
   }
 
   flushPathBuffer(output, state);
@@ -303,13 +320,19 @@ function flushPathBuffer(output, state) {
   }
 }
 
-function handleGraphicsOperator(tokens, index, output, state, options) {
+function passthroughOperator(tokens, index, output, state, operandStart) {
+  flushPathBuffer(output, state);
+  output.push(...tokens.slice(operandStart, index + 1));
+  return { nextIndex: index + 1 };
+}
+
+function handleGraphicsOperator(tokens, index, output, state, options, operandStart) {
   const token = tokens[index];
 
   if (token === "q") {
     flushPathBuffer(output, state);
     state.stack.push(cloneGraphicsState(state));
-    output.push(token);
+    output.push(...tokens.slice(operandStart, index + 1));
     return { nextIndex: index + 1 };
   }
 
@@ -318,14 +341,15 @@ function handleGraphicsOperator(tokens, index, output, state, options) {
     if (state.stack.length > 0) {
       restoreGraphicsState(state, state.stack.pop());
     }
-    output.push(token);
+    output.push(...tokens.slice(operandStart, index + 1));
     return { nextIndex: index + 1 };
   }
 
   if (token === "cm") {
     flushPathBuffer(output, state);
     const args = readNumberArgs(tokens, index, 6);
-    state.ctm = multiplyMatrix(state.ctm, args);
+    const [a, b, c, d, e, f] = args;
+    state.ctm = multiplyMatrix({ a, b, c, d, e, f }, state.ctm);
     output.push(...tokens.slice(index - 6, index + 1));
     return { nextIndex: index + 1 };
   }
@@ -344,6 +368,24 @@ function handleGraphicsOperator(tokens, index, output, state, options) {
     state.fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
     output.push(...tokens.slice(index - 1, index + 1));
     return { nextIndex: index + 1 };
+  }
+
+  if (token === "k") {
+    flushPathBuffer(output, state);
+    const args = readNumberArgs(tokens, index, 4);
+    const [c, m, y, kVal] = args;
+    const r = (1 - c) * (1 - kVal);
+    const g = (1 - m) * (1 - kVal);
+    const b = (1 - y) * (1 - kVal);
+    state.fillColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
+    output.push(...tokens.slice(index - 4, index + 1));
+    return { nextIndex: index + 1 };
+  }
+
+  if (token === "gs" || token === "cs" || token === "CS" || token === "sc" || token === "scn" || token === "SC" || token === "SCN") {
+    flushPathBuffer(output, state);
+    state.fillColor = { kind: "unknown" };
+    return passthroughOperator(tokens, index, output, state, operandStart);
   }
 
   if (token === "re") {
@@ -397,13 +439,11 @@ function handleGraphicsOperator(tokens, index, output, state, options) {
     return { nextIndex: index + 1 };
   }
 
-  flushPathBuffer(output, state);
-  output.push(token);
-  return { nextIndex: index + 1 };
+  return passthroughOperator(tokens, index, output, state, operandStart);
 }
 
 function shouldRemoveFill(bbox, fillColor, options) {
-  if (!bbox || !fillColor) {
+  if (!bbox || !fillColor || fillColor.kind === "unknown") {
     return false;
   }
 
@@ -527,11 +567,34 @@ function tokenizeContentStream(bytes) {
     index = word.nextIndex;
 
     if (word.value === "ID") {
-      index = skipInlineImageData(source, index);
+      const inlineImage = readInlineImageSegment(source, index);
+      tokens.push(inlineImage.value);
+      index = inlineImage.nextIndex;
+      continue;
     }
   }
 
   return tokens;
+}
+
+function isRawSegment(token) {
+  return typeof token === "object" && token?.type === "raw";
+}
+
+function readInlineImageSegment(source, idIndex) {
+  const pattern = /[\0\t\n\f\r ]EI(?=[\0\t\n\f\r ])/;
+  const match = pattern.exec(source.slice(idIndex));
+  if (!match) {
+    return {
+      value: { type: "raw", value: source.slice(idIndex) },
+      nextIndex: source.length,
+    };
+  }
+  const end = idIndex + match.index + match[0].length;
+  return {
+    value: { type: "raw", value: source.slice(idIndex, end) },
+    nextIndex: end,
+  };
 }
 
 function skipWhitespace(source, index) {
@@ -570,15 +633,6 @@ function readPdfName(source, index) {
     cursor += 1;
   }
   return { value: source.slice(index, cursor), nextIndex: cursor };
-}
-
-function skipInlineImageData(source, index) {
-  const pattern = /[\0\t\n\f\r ]EI(?=[\0\t\n\f\r ])/;
-  const match = pattern.exec(source.slice(index));
-  if (!match) {
-    return source.length;
-  }
-  return index + match.index + match[0].length;
 }
 
 function readLiteralString(source, index) {
@@ -664,11 +718,7 @@ function readArray(source, index) {
 }
 
 function readNumberArgs(tokens, operatorIndex, count) {
-  const args = [];
-  for (let offset = count; offset >= 1; offset -= 1) {
-    args.unshift(Number(tokens[operatorIndex - offset]));
-  }
-  return args;
+  return tokens.slice(operatorIndex - count, operatorIndex).map((token) => Number(token));
 }
 
 function findBlockEnd(tokens, startIndex, startToken, endToken) {
@@ -695,7 +745,18 @@ function isFillOperator(token) {
 }
 
 function joinTokens(tokens) {
-  return `${tokens.join(" ")}\n`;
+  let result = "";
+  for (const token of tokens) {
+    if (isRawSegment(token)) {
+      if (result && !result.endsWith("\n") && !/[\0\t\n\f\r ]$/.test(result)) {
+        result += " ";
+      }
+      result += token.value;
+      continue;
+    }
+    result += result ? ` ${token}` : token;
+  }
+  return `${result}\n`;
 }
 
 function identityMatrix() {
@@ -703,7 +764,10 @@ function identityMatrix() {
 }
 
 function multiplyMatrix(left, right) {
-  const [a, b, c, d, e, f] = right;
+  const rightMatrix = Array.isArray(right)
+    ? { a: right[0], b: right[1], c: right[2], d: right[3], e: right[4], f: right[5] }
+    : right;
+  const { a, b, c, d, e, f } = rightMatrix;
   return {
     a: left.a * a + left.c * b,
     b: left.b * a + left.d * b,
