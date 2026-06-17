@@ -302,6 +302,47 @@ async function testCoverRemovalOnlyWhenRevealed() {
   console.log("OK: cover removal is strict to revealed keys");
 }
 
+async function testSmallNestedCoverRemoval() {
+  const baseOptions = {
+    whiteThreshold: 238,
+    revealedCovers: new Set(),
+    recolorText: false,
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const bytes = new TextEncoder().encode(
+    "100 600 200 40 re 1 1 1 rg f 150 610 30 20 re 1 1 1 rg f\n",
+  );
+  const largeKey = makeCoverKey(1, { x: 100, y: 600, w: 200, h: 40 });
+  const smallKey = makeCoverKey(1, { x: 150, y: 610, w: 30, h: 20 });
+
+  const removeSmallOnly = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([smallKey]),
+  });
+  const removeSmallText = new TextDecoder("latin1").decode(removeSmallOnly);
+  if (!removeSmallText.includes("100 600 200 40 re")) {
+    throw new Error("Large cover removed when only small cover was revealed");
+  }
+  if (removeSmallText.includes("150 610 30 20 re")) {
+    throw new Error("Revealed small nested cover was not removed");
+  }
+
+  const removeBoth = transformContentBytes(bytes, {
+    ...baseOptions,
+    revealedCovers: new Set([largeKey, smallKey]),
+  });
+  const removeBothText = new TextDecoder("latin1").decode(removeBoth);
+  if (removeBothText.includes(" re ") || removeBothText.includes(" f")) {
+    throw new Error("Revealed nested covers were not both removed");
+  }
+
+  console.log("OK: small nested white cover rects remove independently");
+}
+
 async function testRecolorOperators() {
   const options = { textColor: "#dd1133", whiteThreshold: 238 };
   const output = [];
@@ -749,6 +790,7 @@ async function main() {
   await testRecolorOnlyTransformRuns();
   await testStreamPassthroughIntegrity();
   await testCoverRemovalOnlyWhenRevealed();
+  await testSmallNestedCoverRemoval();
 
   const sampleBytes = await makeSamplePdf();
   writeFileSync("scripts/sample-test.pdf", sampleBytes);

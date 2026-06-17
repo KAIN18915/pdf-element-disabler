@@ -639,7 +639,26 @@ function instrumentContext(ctx, info) {
   };
 
   let bbox = newBBox();
+  let pathState = {
+    hasCurve: false,
+    hasLine: false,
+    hasRect: false,
+    opCount: 0,
+    rectCount: 0,
+  };
   const canvasArea = info.canvas.width * info.canvas.height;
+
+  const resetPathState = () => {
+    pathState = {
+      hasCurve: false,
+      hasLine: false,
+      hasRect: false,
+      opCount: 0,
+      rectCount: 0,
+    };
+  };
+
+  const isPureRectPath = () => pathState.hasRect && !pathState.hasLine && !pathState.hasCurve;
 
   const include = (x, y) => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
@@ -653,46 +672,67 @@ function instrumentContext(ctx, info) {
 
   ctx.beginPath = () => {
     bbox = newBBox();
+    resetPathState();
     return orig.beginPath();
   };
-  ctx.closePath = () => orig.closePath();
+  ctx.closePath = () => {
+    pathState.opCount += 1;
+    return orig.closePath();
+  };
   ctx.moveTo = (x, y) => {
     include(x, y);
+    pathState.hasLine = true;
+    pathState.opCount += 1;
     return orig.moveTo(x, y);
   };
   ctx.lineTo = (x, y) => {
     include(x, y);
+    pathState.hasLine = true;
+    pathState.opCount += 1;
     return orig.lineTo(x, y);
   };
   ctx.rect = (x, y, w, h) => {
     include(x, y);
     include(x + w, y + h);
+    pathState.hasRect = true;
+    pathState.rectCount += 1;
+    pathState.opCount += 1;
     return orig.rect(x, y, w, h);
   };
   ctx.bezierCurveTo = (cp1x, cp1y, cp2x, cp2y, x, y) => {
     include(cp1x, cp1y);
     include(cp2x, cp2y);
     include(x, y);
+    pathState.hasCurve = true;
+    pathState.opCount += 1;
     return orig.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y);
   };
   ctx.quadraticCurveTo = (cpx, cpy, x, y) => {
     include(cpx, cpy);
     include(x, y);
+    pathState.hasCurve = true;
+    pathState.opCount += 1;
     return orig.quadraticCurveTo(cpx, cpy, x, y);
   };
   ctx.arc = (x, y, r, ...rest) => {
     include(x - r, y - r);
     include(x + r, y + r);
+    pathState.hasCurve = true;
+    pathState.opCount += 1;
     return orig.arc(x, y, r, ...rest);
   };
   ctx.arcTo = (x1, y1, x2, y2, r) => {
     include(x1, y1);
     include(x2, y2);
+    pathState.hasCurve = true;
+    pathState.opCount += 1;
     return orig.arcTo(x1, y1, x2, y2, r);
   };
   ctx.ellipse = (x, y, rx, ry, ...rest) => {
     include(x - rx, y - ry);
     include(x + rx, y + ry);
+    pathState.hasCurve = true;
+    pathState.opCount += 1;
     return orig.ellipse(x, y, rx, ry, ...rest);
   };
 
@@ -734,34 +774,43 @@ function instrumentContext(ctx, info) {
     return minDim > 0 && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO;
   };
 
-  const isWhiteSymbolShape = (pdfBBox, cssBox) =>
-    isSmallWhiteContent(pdfBBox) || isThinWhiteBar(cssBox) || isLinearWhiteSymbol(cssBox);
+  const isWhiteOutlineGlyph = (pdfBBox, cssBox, coverMeta = {}) => {
+    if (coverMeta.isAxisAlignedRect) {
+      return isThinWhiteBar(cssBox);
+    }
+    if (isThinWhiteBar(cssBox) || isLinearWhiteSymbol(cssBox)) {
+      return true;
+    }
+    if (coverMeta.hasCurve) {
+      return true;
+    }
+    if (coverMeta.hasLine && isSmallWhiteContent(pdfBBox)) {
+      return true;
+    }
+    return false;
+  };
+
+  const buildCoverMeta = (pathArg) => {
+    if (pathArg?.__pathMeta) {
+      return {
+        isAxisAlignedRect: Boolean(pathArg.__pathMeta.isPureRect),
+        hasCurve: Boolean(pathArg.__pathMeta.hasCurve),
+        hasLine: Boolean(pathArg.__pathMeta.hasLine),
+      };
+    }
+    return {
+      isAxisAlignedRect: isPureRectPath(),
+      hasCurve: pathState.hasCurve,
+      hasLine: pathState.hasLine,
+    };
+  };
 
   const isPageBackgroundDevice = (device) => {
     const deviceArea = device.w * device.h;
     return canvasArea > 0 && deviceArea / canvasArea >= PAGE_BACKGROUND_AREA_RATIO;
   };
 
-  const strokeRecolorOptions = () => ({
-    pageArea: (info.viewport.width / info.outputScale)
-      * (info.viewport.height / info.outputScale),
-    pageWidth: info.viewport.width / info.outputScale,
-    pageHeight: info.viewport.height / info.outputScale,
-  });
-
-  const shouldRecolorWhiteStroke = (userBox) => {
-    if (!state.recolorText || !shouldRecolorNearWhite("strokeStyle")) {
-      return false;
-    }
-    const device = transformBox(userBox, ctx.getTransform());
-    if (!device || isPageBackgroundDevice(device)) {
-      return false;
-    }
-    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
-    return shouldRecolorNearWhiteStroke(pdfBBox, ctx.lineWidth, strokeRecolorOptions());
-  };
-
-  const handleCover = (userBox, drawOriginal, styleProp = "fillStyle") => {
+  const handleCover = (userBox, drawOriginal, styleProp = "fillStyle", coverMeta = {}) => {
     const color = parseColor(ctx[styleProp]);
     if (!color || !isNearWhite(color, recolorThresholdFor(styleProp))) {
       drawOriginal();
@@ -782,7 +831,7 @@ function instrumentContext(ctx, info) {
       return;
     }
 
-    if (isWhiteSymbolShape(pdfBBox, cssBox)) {
+    if (isWhiteOutlineGlyph(pdfBBox, cssBox, coverMeta)) {
       drawOriginal();
       return;
     }
@@ -804,13 +853,25 @@ function instrumentContext(ctx, info) {
     }
   };
 
+  const shouldRecolorWhiteStroke = (userBox) => {
+    if (!state.recolorText || !shouldRecolorNearWhite("strokeStyle")) {
+      return false;
+    }
+    const device = transformBox(userBox, ctx.getTransform());
+    if (!device || isPageBackgroundDevice(device)) {
+      return false;
+    }
+    const pdfBBox = deviceBoxToPdfBBox(device, info.outputScale, info.viewport);
+    return shouldRecolorNearWhiteStroke(pdfBBox, ctx.lineWidth, pageRecolorOptions());
+  };
+
   ctx.fill = (...args) => {
     const pathArg = args.find((a) => a && typeof a === "object" && a.__bbox);
     const source = pathArg ? pathArg.__bbox : bbox;
     if (!Number.isFinite(source.minX)) {
       return orig.fill(...args);
     }
-    handleCover({ ...source }, () => orig.fill(...args));
+    handleCover({ ...source }, () => orig.fill(...args), "fillStyle", buildCoverMeta(pathArg));
   };
 
   ctx.fillRect = (x, y, w, h) => {
@@ -820,7 +881,7 @@ function instrumentContext(ctx, info) {
       maxX: Math.max(x, x + w),
       maxY: Math.max(y, y + h),
     };
-    handleCover(userBox, () => orig.fillRect(x, y, w, h));
+    handleCover(userBox, () => orig.fillRect(x, y, w, h), "fillStyle", { isAxisAlignedRect: true });
   };
 
   ctx.fillText = (...args) => {
