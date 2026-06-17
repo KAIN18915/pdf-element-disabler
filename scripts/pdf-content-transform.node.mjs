@@ -5,7 +5,7 @@ import {
   PDFRawStream,
   PDFRef,
   decodePDFRawStream,
-} from "./pdf-lib-shim.js";
+} from "pdf-lib";
 
 const OPERATORS = new Set([
   "b",
