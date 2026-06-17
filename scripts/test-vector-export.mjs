@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, PDFName, StandardFonts, rgb } from "pdf-lib";
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   __test__,
@@ -140,6 +140,30 @@ async function makeGraphicsPdf() {
     color: rgb(1, 1, 1),
     borderWidth: 0,
   });
+
+  return new Uint8Array(await doc.save());
+}
+
+async function makeIccBasedColorSpacePdf() {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const context = doc.context;
+  const iccStream = context.flateStream(Uint8Array.from([0]), {
+    N: 3,
+    Alternate: PDFName.of("DeviceRGB"),
+  });
+  const iccRef = context.register(iccStream);
+  const content = new TextEncoder().encode(
+    "/Cs1 cs 1 1 1 sc BT /F1 12 Tf 72 720 Td (ICCBased white) Tj ET\n",
+  );
+  const contentRef = context.register(context.flateStream(content));
+
+  page.node.set(PDFName.of("Resources"), context.obj({
+    ColorSpace: {
+      Cs1: [PDFName.of("ICCBased"), iccRef],
+    },
+  }));
+  page.node.set(PDFName.of("Contents"), contentRef);
 
   return new Uint8Array(await doc.save());
 }
@@ -515,6 +539,68 @@ async function testPathStrokeRecolorOnly() {
   console.log("OK: bracket and thin path strokes recolored; fills and page background preserved");
 }
 
+async function testIccBasedRgbColorSpaceRecolor() {
+  const bytes = await makeIccBasedColorSpacePdf();
+  const outDoc = await PDFDocument.load(bytes.slice());
+  await transformPdfContent(outDoc, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+  });
+  const afterTokens = await loadPageTokens(outDoc, 0);
+  const afterText = afterTokens.join(" ");
+  if (!afterText.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`ICCBased /Cs1 white text was not recolored: ${afterText}`);
+  }
+  const tjIndex = afterText.indexOf("Tj");
+  const beforeTj = afterText.slice(0, tjIndex);
+  if (!beforeTj.includes(`${TARGET_RGB} rg`)) {
+    throw new Error(`ICCBased text show is not preceded by target color: ${afterText}`);
+  }
+  console.log("OK: ICCBased N=3 /Cs1 color space resolves to RGB for white text");
+}
+
+async function testWhiteOutlineFillRecolor() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 612,
+    pageHeight: 792,
+    pageArea: 612 * 792,
+  };
+
+  const outlineStream = transformContentBytes(
+    new TextEncoder().encode(
+      "1 1 1 rg 10 10 m 12 10 12 40 10 40 c 8 40 8 10 10 10 c h f*\n",
+    ),
+    opts,
+  );
+  const outlineText = new TextDecoder("latin1").decode(outlineStream);
+  if (!outlineText.includes(`${TARGET_RGB} rg f*`)) {
+    throw new Error(`White outline fill bracket was not recolored before f*: ${outlineText}`);
+  }
+
+  const rectCoverStream = transformContentBytes(
+    new TextEncoder().encode("1 1 1 rg 100 600 200 40 re f 1 1 1 rg 0 0 612 792 re f\n"),
+    opts,
+  );
+  const rectCoverText = new TextDecoder("latin1").decode(rectCoverStream);
+  if (rectCoverText.includes(`${TARGET_RGB} rg f`)) {
+    throw new Error(`White cover/background rectangle was recolored: ${rectCoverText}`);
+  }
+  if (!rectCoverText.includes("100 600 200 40 re f") || !rectCoverText.includes("0 0 612 792 re f")) {
+    throw new Error(`White cover/background rectangle was altered: ${rectCoverText}`);
+  }
+
+  console.log("OK: white f* outline symbols recolor while white covers/backgrounds stay white");
+}
+
 async function testFormInheritedWhiteTextRecolor() {
   const formBytes = new TextEncoder().encode("BT /F1 12 Tf 10 20 Td (Hidden) Tj ET\n");
   const pageBytes = new TextEncoder().encode("1 1 1 rg /Fm0 Do\n");
@@ -781,6 +867,8 @@ async function main() {
   await testRecolorOperators();
   await testRedHighlightWhiteText();
   await testPathStrokeRecolorOnly();
+  await testIccBasedRgbColorSpaceRecolor();
+  await testWhiteOutlineFillRecolor();
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
