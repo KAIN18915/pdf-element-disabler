@@ -65,6 +65,84 @@ export function getTextSpaceDescent(style = {}, ascentRatio = getFontAscentRatio
   return Math.min(1 - ascentRatio, 0.22);
 }
 
+export function multiplyPdfMatrices(a, b) {
+  return [
+    a[0] * b[0] + a[2] * b[1],
+    a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3],
+    a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4],
+    a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+}
+
+function getViewportFlipTransform(viewport) {
+  const { pageX, pageY, pageHeight } = viewport.rawDims;
+  return [1, 0, 0, -1, -pageX, pageY + pageHeight];
+}
+
+// Match PDF.js TextLayer: negative text-matrix d flips text-space Y vs user space.
+function getTextSpaceVerticalExtents(tx, style = {}) {
+  const ascentRatio = getFontAscentRatio(style);
+  const textSpaceAscent = ascentRatio;
+  const textSpaceDescent = getTextSpaceDescent(style, ascentRatio);
+  if (tx[3] < 0) {
+    return { top: -textSpaceAscent, bottom: textSpaceDescent };
+  }
+  return { top: textSpaceAscent, bottom: -textSpaceDescent };
+}
+
+export function pdfBBoxToCssBox(pdfBBox, viewport) {
+  const x1 = pdfBBox.x;
+  const y1 = pdfBBox.y;
+  const x2 = pdfBBox.x + pdfBBox.w;
+  const y2 = pdfBBox.y + pdfBBox.h;
+  const corners = [
+    [x1, y1],
+    [x2, y1],
+    [x1, y2],
+    [x2, y2],
+  ].map(([x, y]) => viewport.convertToViewportPoint(x, y));
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const [px, py] of corners) {
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  }
+
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+export function getTextLayerCssBox(item, style, viewport) {
+  const tx = multiplyPdfMatrices(getViewportFlipTransform(viewport), item.transform);
+  const fontHeight = Math.hypot(tx[2], tx[3]);
+  const fontAscent = fontHeight * getFontAscentRatio(style);
+  const angle = Math.atan2(tx[1], tx[0]);
+  let left;
+  let top;
+  if (Math.abs(angle) < 1e-6) {
+    left = tx[4];
+    top = tx[5] - fontAscent;
+  } else {
+    left = tx[4] + fontAscent * Math.sin(angle);
+    top = tx[5] - fontAscent * Math.cos(angle);
+  }
+
+  const scale = viewport.scale;
+  return {
+    x: left * scale,
+    y: top * scale,
+    w: Math.max((item.width || 0) * scale, 0),
+    h: fontHeight * scale,
+  };
+}
+
 function getTightTextSpaceWidth(item) {
   const textSpaceWidth = getTextSpaceWidth(item);
   const trailingTrim = Math.min(textSpaceWidth * 0.04, 0.08);
@@ -75,16 +153,14 @@ export function getTextItemPdfBBox(item, style = {}) {
   const tx = item.transform;
   const hScale = getHorizontalScale(tx);
   const vScale = Math.hypot(tx[2], tx[3]) || hScale || 1;
-  const ascentRatio = getFontAscentRatio(style);
-  const textSpaceAscent = ascentRatio;
-  const textSpaceDescent = getTextSpaceDescent(style, ascentRatio);
+  const { top, bottom } = getTextSpaceVerticalExtents(tx, style);
   const textSpaceWidth = getTightTextSpaceWidth(item);
 
   const corners = [
-    [0, -textSpaceDescent],
-    [textSpaceWidth, -textSpaceDescent],
-    [0, textSpaceAscent],
-    [textSpaceWidth, textSpaceAscent],
+    [0, bottom],
+    [textSpaceWidth, bottom],
+    [0, top],
+    [textSpaceWidth, top],
   ].map(([x, y]) => applyPdfMatrix(tx, x, y));
   const bbox = pdfPointsToBBox(corners);
 
@@ -251,10 +327,6 @@ function finalizeSpanBBox(group) {
     return entries.length === 1 ? entries[0].bbox : unionEntryBBoxes(entries);
   }
 
-  const ascentRatio = getFontAscentRatio(group.style ?? {});
-  const textSpaceAscent = ascentRatio;
-  const textSpaceDescent = getTextSpaceDescent(group.style ?? {}, ascentRatio);
-
   const anchor = entries.reduce((leftmost, entry) =>
     entry.metrics.baselineX <= leftmost.metrics.baselineX ? entry : leftmost,
   );
@@ -268,12 +340,13 @@ function finalizeSpanBBox(group) {
   const spanWidth = Math.max(maxX - minX, 0);
   const offsetX = (minX - anchor.metrics.baselineX) / hScale;
   const textSpaceWidth = spanWidth / hScale;
+  const { top, bottom } = getTextSpaceVerticalExtents(anchorTx, group.style ?? {});
 
   const corners = [
-    [offsetX, -textSpaceDescent],
-    [offsetX + textSpaceWidth, -textSpaceDescent],
-    [offsetX, textSpaceAscent],
-    [offsetX + textSpaceWidth, textSpaceAscent],
+    [offsetX, bottom],
+    [offsetX + textSpaceWidth, bottom],
+    [offsetX, top],
+    [offsetX + textSpaceWidth, top],
   ].map(([x, y]) => applyPdfMatrix(anchorTx, x, y));
 
   return pdfPointsToBBox(corners);
