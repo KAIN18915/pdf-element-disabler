@@ -82,6 +82,9 @@ const OPERATORS = new Set([
 ]);
 
 const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
+const SMALL_WHITE_ELEMENT_MAX_PDF_AREA = 400;
+const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k"]);
+const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K"]);
 
 export function needsContentStreamTransform(options) {
   if (options.recolorText) {
@@ -298,6 +301,10 @@ function transformContentBytes(bytes, options) {
     }
 
     if (isOperator(token)) {
+      if (options.recolorText && tryPushRecoloredColorOperator(tokens, index, token, options, output)) {
+        index += 1;
+        continue;
+      }
       updateGraphicsState(tokens, index, state, token);
     }
 
@@ -444,42 +451,80 @@ function shouldRemoveFill(bbox, fillColor, options) {
     return false;
   }
 
+  if (bbox.w * bbox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
+    return false;
+  }
+
   const key = makeCoverKey(options.pageNumber, bbox);
   return Boolean(options.revealedCovers?.has(key));
 }
 
 function recolorTextBlock(blockTokens, options, outerState) {
   const output = [];
-  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
 
   for (let index = 0; index < blockTokens.length; index += 1) {
     const token = blockTokens[index];
-
-    if (token === "rg") {
-      const args = readNumberArgs(blockTokens, index, 3);
-      const color = { r: args[0], g: args[1], b: args[2] };
-      if (isNearWhite(color.r, color.g, color.b, options.whiteThreshold ?? 238)) {
-        output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), "rg");
-      } else {
-        output.push(...blockTokens.slice(index - 3, index + 1));
-      }
+    if (tryPushRecoloredColorOperator(blockTokens, index, token, options, output)) {
       continue;
     }
-
-    if (token === "g") {
-      const gray = readNumberArgs(blockTokens, index, 1)[0];
-      if (isNearWhite(gray, gray, gray, options.whiteThreshold ?? 238)) {
-        output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), "rg");
-      } else {
-        output.push(...blockTokens.slice(index - 1, index + 1));
-      }
-      continue;
-    }
-
     output.push(token);
   }
 
   return output;
+}
+
+function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, output) {
+  if (!FILL_COLOR_OPERATORS.has(token) && !STROKE_COLOR_OPERATORS.has(token)) {
+    return false;
+  }
+
+  const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+  const threshold = options.whiteThreshold ?? 238;
+  const isStroke = STROKE_COLOR_OPERATORS.has(token);
+
+  if (token === "rg" || token === "RG") {
+    const args = readNumberArgs(tokens, operatorIndex, 3);
+    if (!isNearWhite(args[0], args[1], args[2], threshold)) {
+      return false;
+    }
+    const outOp = isStroke ? "RG" : "rg";
+    output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), outOp);
+    return true;
+  }
+
+  if (token === "g" || token === "G") {
+    const gray = readNumberArgs(tokens, operatorIndex, 1)[0];
+    if (!isNearWhite(gray, gray, gray, threshold)) {
+      return false;
+    }
+    output.push(
+      formatNumber(target[0]),
+      formatNumber(target[1]),
+      formatNumber(target[2]),
+      isStroke ? "RG" : "rg",
+    );
+    return true;
+  }
+
+  if (token === "k" || token === "K") {
+    const args = readNumberArgs(tokens, operatorIndex, 4);
+    const [c, m, y, kVal] = args;
+    const r = (1 - c) * (1 - kVal);
+    const g = (1 - m) * (1 - kVal);
+    const b = (1 - y) * (1 - kVal);
+    if (!isNearWhite(r, g, b, threshold)) {
+      return false;
+    }
+    output.push(
+      formatNumber(target[0]),
+      formatNumber(target[1]),
+      formatNumber(target[2]),
+      isStroke ? "RG" : "rg",
+    );
+    return true;
+  }
+
+  return false;
 }
 
 function tokenizeContentStream(bytes) {
@@ -825,6 +870,7 @@ export const __test__ = {
   tokenizeContentStream,
   transformContentBytes,
   tryRemoveRevealedCoverRectFill,
+  tryPushRecoloredColorOperator,
   makeCoverKey,
   needsContentStreamTransform,
 };
