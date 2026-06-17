@@ -81,6 +81,16 @@ const OPERATORS = new Set([
   '"',
 ]);
 
+const PURE_FILL_OPERATORS = new Set(["f", "F", "f*"]);
+
+export function needsContentStreamTransform(options) {
+  if (options.recolorText) {
+    return true;
+  }
+  const revealed = options.revealedCovers;
+  return Boolean(revealed && revealed.size > 0);
+}
+
 export function makeCoverKey(pageNumber, pdfBBox) {
   const round1 = (value) => Math.round(value * 10) / 10;
   const x = pdfBBox.x ?? pdfBBox.minX ?? 0;
@@ -97,6 +107,10 @@ export function makeCoverKey(pageNumber, pdfBBox) {
 }
 
 export async function transformPdfContent(pdfDoc, options) {
+  if (!needsContentStreamTransform(options)) {
+    return;
+  }
+
   const context = pdfDoc.context;
   const processedStreams = new Set();
   const pages = pdfDoc.getPages();
@@ -246,27 +260,24 @@ function hasFlateFilter(filter) {
 }
 
 function transformContentBytes(bytes, options) {
+  if (!needsContentStreamTransform(options)) {
+    return bytes;
+  }
+
   const tokens = tokenizeContentStream(bytes);
   const output = [];
   const state = createGraphicsState(options.pageWidth, options.pageHeight);
-  let operandStart = 0;
 
   for (let index = 0; index < tokens.length; ) {
     const token = tokens[index];
 
     if (isRawSegment(token)) {
-      flushPathBuffer(output, state);
       output.push(token);
       index += 1;
-      operandStart = index;
       continue;
     }
 
     if (token === "BT") {
-      flushPathBuffer(output, state);
-      if (index > operandStart) {
-        output.push(...tokens.slice(operandStart, index));
-      }
       const blockEnd = findBlockEnd(tokens, index, "BT", "ET");
       const blockTokens = tokens.slice(index, blockEnd + 1);
       if (options.recolorText) {
@@ -275,26 +286,25 @@ function transformContentBytes(bytes, options) {
         output.push(...blockTokens);
       }
       index = blockEnd + 1;
-      operandStart = index;
       continue;
+    }
+
+    if (token === "re") {
+      const removal = tryRemoveRevealedCoverRectFill(tokens, index, state, options);
+      if (removal) {
+        index = removal.nextIndex;
+        continue;
+      }
     }
 
     if (isOperator(token)) {
-      const handled = handleGraphicsOperator(tokens, index, output, state, options, operandStart);
-      index = handled.nextIndex;
-      operandStart = index;
-      continue;
+      updateGraphicsState(tokens, index, state, token);
     }
 
+    output.push(token);
     index += 1;
   }
 
-  if (operandStart < tokens.length) {
-    flushPathBuffer(output, state);
-    output.push(...tokens.slice(operandStart));
-  }
-
-  flushPathBuffer(output, state);
   return new TextEncoder().encode(joinTokens(output));
 }
 
@@ -305,141 +315,113 @@ function createGraphicsState(pageWidth, pageHeight) {
     ctm: identityMatrix(),
     stack: [],
     fillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
-    pathBuffer: [],
-    pathBbox: null,
-    pendingRect: null,
   };
 }
 
-function flushPathBuffer(output, state) {
-  if (state.pathBuffer.length > 0) {
-    output.push(...state.pathBuffer);
-    state.pathBuffer = [];
-    state.pathBbox = null;
-    state.pendingRect = null;
-  }
-}
-
-function passthroughOperator(tokens, index, output, state, operandStart) {
-  flushPathBuffer(output, state);
-  output.push(...tokens.slice(operandStart, index + 1));
-  return { nextIndex: index + 1 };
-}
-
-function handleGraphicsOperator(tokens, index, output, state, options, operandStart) {
-  const token = tokens[index];
-
+function updateGraphicsState(tokens, index, state, token) {
   if (token === "q") {
-    flushPathBuffer(output, state);
     state.stack.push(cloneGraphicsState(state));
-    output.push(...tokens.slice(operandStart, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "Q") {
-    flushPathBuffer(output, state);
     if (state.stack.length > 0) {
       restoreGraphicsState(state, state.stack.pop());
     }
-    output.push(...tokens.slice(operandStart, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "cm") {
-    flushPathBuffer(output, state);
     const args = readNumberArgs(tokens, index, 6);
     const [a, b, c, d, e, f] = args;
     state.ctm = multiplyMatrix({ a, b, c, d, e, f }, state.ctm);
-    output.push(...tokens.slice(index - 6, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "rg") {
-    flushPathBuffer(output, state);
     const args = readNumberArgs(tokens, index, 3);
     state.fillColor = { kind: "rgb", r: args[0], g: args[1], b: args[2] };
-    output.push(...tokens.slice(index - 3, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "g") {
-    flushPathBuffer(output, state);
     const gray = readNumberArgs(tokens, index, 1)[0];
     state.fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
-    output.push(...tokens.slice(index - 1, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "k") {
-    flushPathBuffer(output, state);
     const args = readNumberArgs(tokens, index, 4);
     const [c, m, y, kVal] = args;
     const r = (1 - c) * (1 - kVal);
     const g = (1 - m) * (1 - kVal);
     const b = (1 - y) * (1 - kVal);
     state.fillColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
-    output.push(...tokens.slice(index - 4, index + 1));
-    return { nextIndex: index + 1 };
+    return;
   }
 
   if (token === "gs" || token === "cs" || token === "CS" || token === "sc" || token === "scn" || token === "SC" || token === "SCN") {
-    flushPathBuffer(output, state);
     state.fillColor = { kind: "unknown" };
-    return passthroughOperator(tokens, index, output, state, operandStart);
+  }
+}
+
+function tryRemoveRevealedCoverRectFill(tokens, reIndex, state, options) {
+  if (reIndex < 4) {
+    return null;
   }
 
-  if (token === "re") {
-    const args = readNumberArgs(tokens, index, 4);
-    state.pendingRect = { x: args[0], y: args[1], w: args[2], h: args[3] };
-    state.pathBbox = rectToBbox(args[0], args[1], args[2], args[3], state.ctm);
-    state.pathBuffer.push(...tokens.slice(index - 4, index + 1));
-    return { nextIndex: index + 1 };
+  const rectArgs = readNumberArgs(tokens, reIndex, 4);
+  if (rectArgs.some((value) => !Number.isFinite(value))) {
+    return null;
   }
 
-  if (token === "m" || token === "l" || token === "c" || token === "v" || token === "y") {
-    const argCount = token === "c" ? 6 : token === "m" || token === "l" ? 2 : 4;
-    const args = readNumberArgs(tokens, index, argCount);
-    const points = [];
-    if (token === "m" || token === "l") {
-      points.push([args[0], args[1]]);
-    } else if (token === "c") {
-      points.push([args[4], args[5]]);
-    } else {
-      points.push([args[2], args[3]]);
-    }
-    for (const [x, y] of points) {
-      const transformed = applyMatrix(state.ctm, x, y);
-      state.pathBbox = includePoint(state.pathBbox, transformed.x, transformed.y);
-    }
-    state.pathBuffer.push(...tokens.slice(index - argCount, index + 1));
-    return { nextIndex: index + 1 };
-  }
+  let cursor = reIndex + 1;
+  let fillColor = { ...state.fillColor };
 
-  if (token === "h") {
-    state.pathBuffer.push(token);
-    return { nextIndex: index + 1 };
-  }
+  while (cursor < tokens.length) {
+    const token = tokens[cursor];
 
-  if (isFillOperator(token)) {
-    const bbox = state.pathBbox || (state.pendingRect
-      ? rectToBbox(state.pendingRect.x, state.pendingRect.y, state.pendingRect.w, state.pendingRect.h, state.ctm)
-      : null);
-
-    if (shouldRemoveFill(bbox, state.fillColor, options)) {
-      state.pathBuffer = [];
-      state.pathBbox = null;
-      state.pendingRect = null;
-      return { nextIndex: index + 1 };
+    if (token === "rg") {
+      const args = readNumberArgs(tokens, cursor, 3);
+      fillColor = { kind: "rgb", r: args[0], g: args[1], b: args[2] };
+      cursor += 1;
+      continue;
     }
 
-    output.push(...state.pathBuffer, token);
-    state.pathBuffer = [];
-    state.pathBbox = null;
-    state.pendingRect = null;
-    return { nextIndex: index + 1 };
+    if (token === "g") {
+      const gray = readNumberArgs(tokens, cursor, 1)[0];
+      fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
+      cursor += 1;
+      continue;
+    }
+
+    if (token === "k") {
+      const args = readNumberArgs(tokens, cursor, 4);
+      const [c, m, y, kVal] = args;
+      const r = (1 - c) * (1 - kVal);
+      const g = (1 - m) * (1 - kVal);
+      const b = (1 - y) * (1 - kVal);
+      fillColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
+      cursor += 1;
+      continue;
+    }
+
+    if (PURE_FILL_OPERATORS.has(token)) {
+      const bbox = rectToBbox(rectArgs[0], rectArgs[1], rectArgs[2], rectArgs[3], state.ctm);
+      if (shouldRemoveFill(bbox, fillColor, options)) {
+        return { nextIndex: cursor + 1 };
+      }
+      return null;
+    }
+
+    if (isOperator(token)) {
+      return null;
+    }
+
+    cursor += 1;
   }
 
-  return passthroughOperator(tokens, index, output, state, operandStart);
+  return null;
 }
 
 function shouldRemoveFill(bbox, fillColor, options) {
@@ -463,14 +445,11 @@ function shouldRemoveFill(bbox, fillColor, options) {
   }
 
   const key = makeCoverKey(options.pageNumber, bbox);
-  return Boolean(options.revealAllOverlays || options.revealedCovers?.has(key));
+  return Boolean(options.revealedCovers?.has(key));
 }
 
 function recolorTextBlock(blockTokens, options, outerState) {
   const output = [];
-  const textState = {
-    fillColor: { ...outerState.fillColor },
-  };
   const target = hexToPdfRgb(options.textColor ?? "#dd1133");
 
   for (let index = 0; index < blockTokens.length; index += 1) {
@@ -484,7 +463,6 @@ function recolorTextBlock(blockTokens, options, outerState) {
       } else {
         output.push(...blockTokens.slice(index - 3, index + 1));
       }
-      textState.fillColor = { kind: "rgb", ...color };
       continue;
     }
 
@@ -492,10 +470,8 @@ function recolorTextBlock(blockTokens, options, outerState) {
       const gray = readNumberArgs(blockTokens, index, 1)[0];
       if (isNearWhite(gray, gray, gray, options.whiteThreshold ?? 238)) {
         output.push(formatNumber(target[0]), formatNumber(target[1]), formatNumber(target[2]), "rg");
-        textState.fillColor = { kind: "rgb", r: target[0], g: target[1], b: target[2] };
       } else {
         output.push(...blockTokens.slice(index - 1, index + 1));
-        textState.fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
       }
       continue;
     }
@@ -740,10 +716,6 @@ function isOperator(token) {
   return OPERATORS.has(token);
 }
 
-function isFillOperator(token) {
-  return token === "f" || token === "F" || token === "f*" || token === "B" || token === "B*" || token === "b" || token === "b*";
-}
-
 function joinTokens(tokens) {
   let result = "";
   for (const token of tokens) {
@@ -805,17 +777,6 @@ function rectToBbox(x, y, w, h, matrix) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-function includePoint(bbox, x, y) {
-  if (!bbox) {
-    return { x, y, w: 0, h: 0, minX: x, minY: y, maxX: x, maxY: y };
-  }
-  const minX = Math.min(bbox.minX ?? bbox.x, x);
-  const minY = Math.min(bbox.minY ?? bbox.y, y);
-  const maxX = Math.max(bbox.maxX ?? bbox.x + bbox.w, x);
-  const maxY = Math.max(bbox.maxY ?? bbox.y + bbox.h, y);
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY, minX, minY, maxX, maxY };
-}
-
 function cloneGraphicsState(state) {
   return {
     pageWidth: state.pageWidth,
@@ -823,18 +784,12 @@ function cloneGraphicsState(state) {
     ctm: { ...state.ctm },
     stack: [],
     fillColor: { ...state.fillColor },
-    pathBuffer: [...state.pathBuffer],
-    pathBbox: state.pathBbox ? { ...state.pathBbox } : null,
-    pendingRect: state.pendingRect ? { ...state.pendingRect } : null,
   };
 }
 
 function restoreGraphicsState(state, saved) {
   state.ctm = saved.ctm;
   state.fillColor = saved.fillColor;
-  state.pathBuffer = [...saved.pathBuffer];
-  state.pathBbox = saved.pathBbox;
-  state.pendingRect = saved.pendingRect;
 }
 
 function normalizeColor(color) {
@@ -865,3 +820,11 @@ function formatNumber(value) {
   const rounded = Math.round(value * 1000) / 1000;
   return Number.isInteger(rounded) ? String(rounded) : String(rounded);
 }
+
+export const __test__ = {
+  tokenizeContentStream,
+  transformContentBytes,
+  tryRemoveRevealedCoverRectFill,
+  makeCoverKey,
+  needsContentStreamTransform,
+};
