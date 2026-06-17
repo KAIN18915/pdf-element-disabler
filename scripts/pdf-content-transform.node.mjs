@@ -91,6 +91,8 @@ export const BRACKET_ASPECT_RATIO = 3;
 const MAX_THIN_SYMBOL_AREA = 2000;
 const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const PAGE_BACKGROUND_AREA_RATIO = 0.9;
+const MIN_OUTLINE_SYMBOL_OPS = 6;
+const MAX_OUTLINE_SYMBOL_AREA = 8000;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
 const TEXT_SHOW_OPERATORS = new Set(["Tj", "TJ", "'", '"']);
@@ -142,6 +144,7 @@ export async function transformPdfContent(pdfDoc, options) {
       pageHeight: height,
       pageArea: width * height,
       processedStreams,
+      colorSpaceResolver: createColorSpaceResolver(resourcesRef, context),
       formResolver: options.recolorText
         ? createFormResolver(resourcesRef, context)
         : null,
@@ -213,6 +216,7 @@ function createFormResolver(resourcesRef, context, parentResourceRefs = []) {
 
     const bbox = readFormBBox(dict);
     const nestedResourcesRef = dict.get(PDFName.of("Resources"));
+    const nestedColorSpaceResolver = createColorSpaceResolver(nestedResourcesRef ?? resourcesRef, context);
     const nestedFormResolver = nestedResourcesRef
       ? createFormResolver(
         nestedResourcesRef,
@@ -225,9 +229,97 @@ function createFormResolver(resourcesRef, context, parentResourceRefs = []) {
       bytes: decodePDFRawStream(stream).decode(),
       width: bbox.width,
       height: bbox.height,
+      colorSpaceResolver: nestedColorSpaceResolver,
       nestedFormResolver,
     };
   };
+}
+
+function createColorSpaceResolver(resourcesRef, context) {
+  const resourcesDict = resourcesRef ? context.lookupMaybe(resourcesRef, PDFDict) : null;
+  const colorSpaces = readResourceColorSpaces(resourcesDict, context);
+
+  return (nameToken) => {
+    const direct = normalizeDeviceColorSpaceName(nameToken);
+    if (direct !== "unknown") {
+      return direct;
+    }
+
+    if (typeof nameToken !== "string" || !nameToken.startsWith("/")) {
+      return "unknown";
+    }
+
+    return colorSpaces.get(nameToken.slice(1)) ?? "unknown";
+  };
+}
+
+function readResourceColorSpaces(resourcesDict, context) {
+  const colorSpaces = new Map();
+  const colorSpaceDict = resourcesDict?.lookupMaybe(PDFName.of("ColorSpace"), PDFDict);
+  if (!colorSpaceDict) {
+    return colorSpaces;
+  }
+
+  for (const [name, value] of colorSpaceDict.entries()) {
+    const resolved = resolveColorSpaceObject(value, context, new Set());
+    if (resolved !== "unknown") {
+      colorSpaces.set(name.toString().replace(/^\//, ""), resolved);
+    }
+  }
+
+  return colorSpaces;
+}
+
+function resolveColorSpaceObject(value, context, seen) {
+  const object = value instanceof PDFRef ? context.lookup(value) : value;
+  if (!object || seen.has(object)) {
+    return "unknown";
+  }
+  seen.add(object);
+
+  if (object instanceof PDFName) {
+    return normalizeDeviceColorSpaceName(object.toString());
+  }
+
+  if (object instanceof PDFArray && object.size() > 0) {
+    const kind = object.get(0)?.toString();
+    if (kind === "/ICCBased") {
+      return resolveIccBasedColorSpace(object, context, seen);
+    }
+    if (kind === "/DeviceRGB" || kind === "/DeviceCMYK" || kind === "/DeviceGray") {
+      return normalizeDeviceColorSpaceName(kind);
+    }
+  }
+
+  return "unknown";
+}
+
+function resolveIccBasedColorSpace(array, context, seen) {
+  const streamRef = array.get(1);
+  const stream = streamRef instanceof PDFRef ? context.lookup(streamRef) : streamRef;
+  const dict = stream?.dict;
+  if (!dict) {
+    return "unknown";
+  }
+
+  const n = Number(dict.get(PDFName.of("N")));
+  if (n === 3) {
+    return "DeviceRGB";
+  }
+
+  const alternate = dict.get(PDFName.of("Alternate"));
+  if (alternate) {
+    return resolveColorSpaceObject(alternate, context, seen);
+  }
+
+  if (n === 1) {
+    return "DeviceGray";
+  }
+  if (n === 4) {
+    return "DeviceCMYK";
+  }
+
+  return "unknown";
 }
 
 async function transformResourceXObjects(pageNode, context, options) {
@@ -412,6 +504,7 @@ function transformContentBytes(bytes, options) {
             pageWidth: formInfo.width,
             pageHeight: formInfo.height,
             pageArea: formInfo.width * formInfo.height,
+            colorSpaceResolver: formInfo.colorSpaceResolver,
             formResolver: formInfo.nestedFormResolver,
           };
           const nestedBytes = transformContentBytes(formInfo.bytes, formOptions);
@@ -450,6 +543,7 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     pageHeight,
     ctm: identityMatrix(),
     stack: [],
+    colorSpaceResolver: inheritedState?.colorSpaceResolver ?? null,
     fillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
     strokeColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
     fillColorSpace: "DeviceGray",
@@ -457,6 +551,9 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     lastRect: null,
     pathBBox: null,
     lineWidth: 1,
+    pathOps: 0,
+    rectCount: 0,
+    hasCurve: false,
   };
 }
 
@@ -527,8 +624,13 @@ function updateGraphicsState(tokens, index, state, token) {
   if (token === "re") {
     const args = readNumberArgs(tokens, index, 4);
     const [rx, ry, rw, rh] = args;
+    if (!state.pathBBox) {
+      resetPathBBox(state);
+    }
     state.lastRect = rectToBbox(rx, ry, rw, rh, state.ctm);
     includeRectInPathBBox(state, rx, ry, rw, rh);
+    state.pathOps += 1;
+    state.rectCount += 1;
     return;
   }
 
@@ -537,6 +639,7 @@ function updateGraphicsState(tokens, index, state, token) {
     const args = readNumberArgs(tokens, index, 2);
     includePointInPathBBox(state, args[0], args[1]);
     state.lastRect = null;
+    state.pathOps += 1;
     return;
   }
 
@@ -544,6 +647,7 @@ function updateGraphicsState(tokens, index, state, token) {
     const args = readNumberArgs(tokens, index, 2);
     includePointInPathBBox(state, args[0], args[1]);
     state.lastRect = null;
+    state.pathOps += 1;
     return;
   }
 
@@ -553,6 +657,8 @@ function updateGraphicsState(tokens, index, state, token) {
     includePointInPathBBox(state, args[2], args[3]);
     includePointInPathBBox(state, args[4], args[5]);
     state.lastRect = null;
+    state.pathOps += 1;
+    state.hasCurve = true;
     return;
   }
 
@@ -561,6 +667,8 @@ function updateGraphicsState(tokens, index, state, token) {
     includePointInPathBBox(state, args[0], args[1]);
     includePointInPathBBox(state, args[2], args[3]);
     state.lastRect = null;
+    state.pathOps += 1;
+    state.hasCurve = true;
     return;
   }
 
@@ -569,11 +677,14 @@ function updateGraphicsState(tokens, index, state, token) {
     includePointInPathBBox(state, args[0], args[1]);
     includePointInPathBBox(state, args[2], args[3]);
     state.lastRect = null;
+    state.pathOps += 1;
+    state.hasCurve = true;
     return;
   }
 
   if (token === "h") {
     state.lastRect = null;
+    state.pathOps += 1;
     return;
   }
 
@@ -583,12 +694,12 @@ function updateGraphicsState(tokens, index, state, token) {
   }
 
   if (token === "cs") {
-    state.fillColorSpace = normalizeColorSpaceName(tokens[index - 1]);
+    state.fillColorSpace = normalizeColorSpaceName(tokens[index - 1], state.colorSpaceResolver);
     return;
   }
 
   if (token === "CS") {
-    state.strokeColorSpace = normalizeColorSpaceName(tokens[index - 1]);
+    state.strokeColorSpace = normalizeColorSpaceName(tokens[index - 1], state.colorSpaceResolver);
     return;
   }
 
@@ -607,6 +718,16 @@ function updateGraphicsState(tokens, index, state, token) {
   if (token === "gs") {
     state.fillColor = { kind: "unknown" };
     state.strokeColor = { kind: "unknown" };
+    return;
+  }
+
+  if (
+    FILL_PAINT_OPERATORS.has(token)
+    || STROKE_PAINT_OPERATORS.has(token)
+    || BOTH_PAINT_OPERATORS.has(token)
+    || token === "n"
+  ) {
+    clearPathState(state);
   }
 }
 
@@ -689,10 +810,6 @@ function shouldRemoveFill(bbox, fillColor, options) {
     return false;
   }
 
-  if (bbox.w * bbox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
-    return false;
-  }
-
   const key = makeCoverKey(options.pageNumber, bbox);
   return Boolean(options.revealedCovers?.has(key));
 }
@@ -707,6 +824,7 @@ function createTextBlockState(outerState) {
     lastKnownStrokeColor: strokeColor.kind !== "unknown" ? strokeColor : null,
     fillColorSpace: outerState.fillColorSpace ?? "DeviceGray",
     strokeColorSpace: outerState.strokeColorSpace ?? "DeviceGray",
+    colorSpaceResolver: outerState.colorSpaceResolver ?? null,
     textRenderingMode: 0,
   };
 }
@@ -726,7 +844,7 @@ function recolorTextBlock(blockTokens, options, outerState) {
     }
 
     if (token === "cs" || token === "CS") {
-      const colorSpace = normalizeColorSpaceName(blockTokens[index - 1]);
+      const colorSpace = normalizeColorSpaceName(blockTokens[index - 1], state.colorSpaceResolver);
       if (token === "cs") {
         state.fillColorSpace = colorSpace;
       } else {
@@ -998,9 +1116,59 @@ function shouldRecolorStrokeAtPaint(state, options) {
   return shouldRecolorNearWhiteStroke(rect, state.lineWidth ?? 1, options);
 }
 
+export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
+  const bbox = pathInfo?.bbox;
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
+    return false;
+  }
+
+  if (isPageBackgroundBbox(bbox, options)) {
+    return false;
+  }
+
+  if (pathInfo.isSimpleRectPath || pathInfo.rectCount > 0) {
+    return false;
+  }
+
+  const area = bbox.w * bbox.h;
+  if (area <= 0 || area > MAX_OUTLINE_SYMBOL_AREA) {
+    return false;
+  }
+
+  if (pathInfo.hasCurve && isBracketLikeBbox(bbox)) {
+    return true;
+  }
+
+  if (pathInfo.hasCurve && pathInfo.pathOps >= 3 && !isWhiteCoverRect(bbox, options)) {
+    return true;
+  }
+
+  if (pathInfo.pathOps >= MIN_OUTLINE_SYMBOL_OPS && isBracketLikeBbox(bbox)) {
+    return true;
+  }
+
+  return pathInfo.pathOps >= MIN_OUTLINE_SYMBOL_OPS
+    && area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+}
+
+function shouldRecolorFillAtPaint(state, options) {
+  if (!isNearWhiteColor(state.fillColor, getFillThreshold(options))) {
+    return false;
+  }
+
+  return shouldRecolorNearWhiteFillPath(getPaintPathInfo(state), options);
+}
+
 function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
   if (!STROKE_PAINT_OPERATORS.has(token)) {
-    return false;
+    if (!FILL_PAINT_OPERATORS.has(token) || !shouldRecolorFillAtPaint(state, options)) {
+      return false;
+    }
+    pushTargetColor(output, options, "rg");
+    applyRecoloredColorToState(state, "rg", options);
+    output.push(token);
+    clearPathState(state);
+    return true;
   }
 
   if (!shouldRecolorStrokeAtPaint(state, options)) {
@@ -1010,8 +1178,7 @@ function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, option
   pushTargetColor(output, options, "RG");
   applyRecoloredColorToState(state, "RG", options);
   output.push(token);
-  state.lastRect = null;
-  state.pathBBox = null;
+  clearPathState(state);
   return true;
 }
 
@@ -1026,6 +1193,9 @@ function newPathBBox() {
 
 function resetPathBBox(state) {
   state.pathBBox = newPathBBox();
+  state.pathOps = 0;
+  state.rectCount = 0;
+  state.hasCurve = false;
 }
 
 function includePointInPathBBox(state, x, y) {
@@ -1066,6 +1236,24 @@ function getPaintBbox(state) {
   return pathBBoxToRect(state.pathBBox);
 }
 
+function getPaintPathInfo(state) {
+  return {
+    bbox: getPaintBbox(state),
+    pathOps: state.pathOps ?? 0,
+    rectCount: state.rectCount ?? 0,
+    hasCurve: Boolean(state.hasCurve),
+    isSimpleRectPath: Boolean(state.lastRect && state.rectCount === 1 && state.pathOps === 1),
+  };
+}
+
+function clearPathState(state) {
+  state.lastRect = null;
+  state.pathBBox = null;
+  state.pathOps = 0;
+  state.rectCount = 0;
+  state.hasCurve = false;
+}
+
 function isPageBackgroundBbox(bbox, options) {
   if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
     return false;
@@ -1102,10 +1290,6 @@ function isWhiteCoverRect(bbox, options) {
     return false;
   }
 
-  if (bbox.w * bbox.h < SMALL_WHITE_ELEMENT_MAX_PDF_AREA) {
-    return false;
-  }
-
   return true;
 }
 
@@ -1138,7 +1322,7 @@ function tryPushRecoloredColorOperator(tokens, operatorIndex, token, options, ou
   return true;
 }
 
-function normalizeColorSpaceName(name) {
+function normalizeDeviceColorSpaceName(name) {
   const normalized = String(name ?? "DeviceGray").replace(/^\//, "");
   if (normalized === "DeviceRGB" || normalized === "RGB") {
     return "DeviceRGB";
@@ -1150,6 +1334,14 @@ function normalizeColorSpaceName(name) {
     return "DeviceGray";
   }
   return "unknown";
+}
+
+function normalizeColorSpaceName(name, resolver = null) {
+  const direct = normalizeDeviceColorSpaceName(name);
+  if (direct !== "unknown") {
+    return direct;
+  }
+  return resolver ? resolver(name) : "unknown";
 }
 
 function readColorFromOperator(tokens, operatorIndex, token, colorSpace) {
@@ -1184,7 +1376,10 @@ function readColorFromOperator(tokens, operatorIndex, token, colorSpace) {
 }
 
 function readScColor(tokens, operatorIndex, colorSpace) {
-  const resolvedSpace = colorSpace === "unknown" ? "DeviceGray" : colorSpace;
+  const resolvedSpace = colorSpace;
+  if (resolvedSpace === "unknown") {
+    return { kind: "unknown", argCount: 0 };
+  }
   if (resolvedSpace === "DeviceRGB") {
     const args = readNumberArgs(tokens, operatorIndex, 3);
     return { kind: "rgb", r: args[0], g: args[1], b: args[2], argCount: 3 };
@@ -1557,11 +1752,15 @@ function cloneGraphicsState(state) {
     stack: [],
     fillColor: cloneColorState(state.fillColor),
     strokeColor: cloneColorState(state.strokeColor),
+    colorSpaceResolver: state.colorSpaceResolver,
     fillColorSpace: state.fillColorSpace,
     strokeColorSpace: state.strokeColorSpace,
     lastRect: state.lastRect ? { ...state.lastRect } : null,
     pathBBox: state.pathBBox ? { ...state.pathBBox } : null,
     lineWidth: state.lineWidth ?? 1,
+    pathOps: state.pathOps ?? 0,
+    rectCount: state.rectCount ?? 0,
+    hasCurve: Boolean(state.hasCurve),
   };
 }
 
@@ -1569,11 +1768,15 @@ function restoreGraphicsState(state, saved) {
   state.ctm = saved.ctm;
   state.fillColor = saved.fillColor;
   state.strokeColor = saved.strokeColor;
+  state.colorSpaceResolver = saved.colorSpaceResolver;
   state.fillColorSpace = saved.fillColorSpace;
   state.strokeColorSpace = saved.strokeColorSpace;
   state.lastRect = saved.lastRect;
   state.pathBBox = saved.pathBBox;
   state.lineWidth = saved.lineWidth ?? 1;
+  state.pathOps = saved.pathOps ?? 0;
+  state.rectCount = saved.rectCount ?? 0;
+  state.hasCurve = Boolean(saved.hasCurve);
 }
 
 function normalizeColor(color) {
@@ -1615,6 +1818,7 @@ export const __test__ = {
   needsContentStreamTransform,
   isPageBackgroundBbox,
   isBracketLikeBbox,
+  shouldRecolorNearWhiteFillPath,
   shouldRecolorNearWhiteStroke,
   shouldRecolorStrokeAtPaint,
   createGraphicsState,
