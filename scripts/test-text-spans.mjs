@@ -1,4 +1,10 @@
 import * as pdfjsLib from "../node_modules/pdfjs-dist/legacy/build/pdf.mjs";
+import {
+  buildMockTextEntry,
+  getTextItemPdfBBox,
+  getTextSpansForPage,
+  mergeTextItemsIntoSpans,
+} from "../text-span-utils.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
@@ -26,214 +32,77 @@ async function loadSamplePdfBytes() {
   );
 }
 
-function applyPdfMatrix(matrix, x, y) {
-  return [
-    matrix[0] * x + matrix[2] * y + matrix[4],
-    matrix[1] * x + matrix[3] * y + matrix[5],
-  ];
-}
-
-function pdfPointsToBBox(points) {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  for (const [x, y] of points) {
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
   }
-
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-function estimateTextWidth(text, fontSize) {
-  return text.length * fontSize * 0.55;
-}
-
-function getFontAscentRatio(style = {}) {
-  if (style.ascent != null) {
-    return style.ascent;
-  }
-  if (style.descent != null) {
-    return 1 + style.descent;
-  }
-  return 0.8;
-}
-
-function getTextItemPdfBBox(item, style = {}) {
-  const transform = item.transform;
-  const fontSize = Math.hypot(transform[0], transform[1]);
-  const fontHeight = Math.hypot(transform[2], transform[3]) || fontSize;
-  const width = item.width || estimateTextWidth(item.str, fontSize);
-  const fontAscent = fontHeight * getFontAscentRatio(style);
-  const fontDescent = fontHeight - fontAscent;
-
-  const textSpaceCorners = [
-    [0, -fontDescent],
-    [width, -fontDescent],
-    [0, fontAscent],
-    [width, fontAscent],
-  ];
-  const userSpacePoints = textSpaceCorners.map(([tx, ty]) => applyPdfMatrix(transform, tx, ty));
-  const bbox = pdfPointsToBBox(userSpacePoints);
-
-  return {
-    ...bbox,
-    baselineX: transform[4],
-    baselineY: transform[5],
-    fontSize,
-    fontHeight,
+function testSingleItemBboxRatio() {
+  const item = {
+    str: "Hello",
+    transform: [12, 0, 0, -12, 100, 700],
+    width: 33,
   };
+  const bbox = getTextItemPdfBBox(item);
+  const ratio = bbox.w / Math.max(bbox.h, 0.01);
+  assert(ratio > 1, `Single horizontal text should be wider than tall (ratio=${ratio.toFixed(2)})`);
 }
 
-function getTransformAngle(transform) {
-  return Math.atan2(transform[1], transform[0]);
-}
+function testInlineMathMerge() {
+  const bodySize = 12;
+  const mathSize = 10;
+  const baselineY = 700;
+  const items = [
+    buildMockTextEntry({
+      index: 0,
+      str: "Let ",
+      transform: [bodySize, 0, 0, -bodySize, 100, baselineY],
+      width: 24,
+    }),
+    buildMockTextEntry({
+      index: 1,
+      str: "x",
+      transform: [mathSize, 0, 0, -mathSize, 124, baselineY + 1.5],
+      width: 6,
+      style: { ascent: 0.75 },
+    }),
+    buildMockTextEntry({
+      index: 2,
+      str: "+",
+      transform: [mathSize, 0, 0, -mathSize, 130, baselineY - 0.5],
+      width: 6,
+      style: { ascent: 0.75 },
+    }),
+    buildMockTextEntry({
+      index: 3,
+      str: "y",
+      transform: [mathSize, 0, 0, -mathSize, 136, baselineY + 1],
+      width: 6,
+      style: { ascent: 0.75 },
+    }),
+    buildMockTextEntry({
+      index: 4,
+      str: " denote a variable.",
+      transform: [bodySize, 0, 0, -bodySize, 142, baselineY],
+      width: 96,
+    }),
+  ];
 
-function getTextItemAdvanceEnd(item) {
-  const width = item.width || 0;
-  return applyPdfMatrix(item.transform, width, 0);
-}
-
-function mergePdfBBoxes(a, b) {
-  const x1 = Math.min(a.x, b.x);
-  const y1 = Math.min(a.y, b.y);
-  const x2 = Math.max(a.x + a.w, b.x + b.w);
-  const y2 = Math.max(a.y + a.h, b.y + b.h);
-  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
-}
-
-function shouldMergeTextItems(previous, current) {
-  if (previous.item.hasEOL) {
-    return false;
-  }
-
-  const prevSize = Math.max(previous.metrics.fontSize, previous.metrics.fontHeight);
-  const currSize = Math.max(current.metrics.fontSize, current.metrics.fontHeight);
-  const lineTolerance = Math.max(prevSize, currSize) * 0.35;
-  if (Math.abs(previous.metrics.baselineY - current.metrics.baselineY) > lineTolerance) {
-    return false;
-  }
-
-  const angleDiff = Math.abs(previous.angle - current.angle);
-  if (angleDiff > 0.2 && Math.abs(angleDiff - Math.PI) > 0.2) {
-    return false;
-  }
-
-  const [prevEndX, prevEndY] = previous.advanceEnd;
-  const gap = Math.hypot(current.metrics.baselineX - prevEndX, current.metrics.baselineY - prevEndY);
-  const maxGap = Math.max(prevSize, currSize) * 1.5;
-  if (gap > maxGap) {
-    return false;
-  }
-
-  const mergedLength = previous.text.length + current.item.str.length;
-  if (mergedLength > 400) {
-    return false;
-  }
-
-  return true;
-}
-
-function mergeTextItemsIntoSpans(items) {
-  const spans = [];
-  let group = null;
-
-  const flushGroup = () => {
-    if (!group) {
-      return;
-    }
-
-    const trimmed = group.text.trim();
-    if (!trimmed) {
-      group = null;
-      return;
-    }
-
-    spans.push({
-      index: group.firstIndex,
-      originalText: group.text,
-      bbox: group.bbox,
-      fontSize: group.fontSize,
-    });
-    group = null;
-  };
-
-  for (const entry of items) {
-    if (!group) {
-      group = {
-        firstIndex: entry.index,
-        text: entry.item.str,
-        bbox: { ...entry.bbox },
-        fontSize: entry.metrics.fontSize,
-        angle: entry.angle,
-        advanceEnd: entry.advanceEnd,
-        item: entry.item,
-        metrics: entry.metrics,
-      };
-      continue;
-    }
-
-    if (shouldMergeTextItems(group, entry)) {
-      group.text += entry.item.str;
-      group.bbox = mergePdfBBoxes(group.bbox, entry.bbox);
-      group.advanceEnd = entry.advanceEnd;
-      group.item = entry.item;
-      continue;
-    }
-
-    flushGroup();
-    group = {
-      firstIndex: entry.index,
-      text: entry.item.str,
-      bbox: { ...entry.bbox },
-      fontSize: entry.metrics.fontSize,
-      angle: entry.angle,
-      advanceEnd: entry.advanceEnd,
-      item: entry.item,
-      metrics: entry.metrics,
-    };
-  }
-
-  flushGroup();
-  return spans;
-}
-
-async function getTextSpansForPage(page) {
-  const textContent = await page.getTextContent();
-  const rawItems = [];
-
-  for (let index = 0; index < textContent.items.length; index += 1) {
-    const item = textContent.items[index];
-    if (!item.str) {
-      continue;
-    }
-
-    const style = textContent.styles[item.fontName] ?? {};
-    const metrics = getTextItemPdfBBox(item, style);
-
-    rawItems.push({
-      index,
-      item,
-      metrics,
-      angle: getTransformAngle(item.transform),
-      advanceEnd: getTextItemAdvanceEnd(item),
-      bbox: {
-        x: metrics.x,
-        y: metrics.y,
-        w: metrics.w,
-        h: metrics.h,
-      },
-    });
-  }
-
-  return mergeTextItemsIntoSpans(rawItems);
+  const spans = mergeTextItemsIntoSpans(items);
+  assert(spans.length === 1, `Inline math should merge into one span, got ${spans.length}`);
+  const ratio = spans[0].bbox.w / Math.max(spans[0].bbox.h, 0.01);
+  assert(ratio > 1.5, `Merged inline sentence should be wide (ratio=${ratio.toFixed(2)})`);
+  assert(
+    spans[0].originalText.includes("x+y"),
+    `Merged text should keep math inline: "${spans[0].originalText}"`,
+  );
 }
 
 async function main() {
+  testSingleItemBboxRatio();
+  testInlineMathMerge();
+
   const bytes = await loadSamplePdfBytes();
   const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
   const page = await pdf.getPage(1);
