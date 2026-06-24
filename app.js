@@ -59,6 +59,8 @@ const state = {
   scale: 1,
   viewerWidth: 0,
   renderToken: 0,
+  documentReady: false,
+  renderDocumentPromise: null,
   // 穴埋め解除の設定
   revealAllOverlays: false,
   recolorText: true,
@@ -226,6 +228,8 @@ async function loadPdf(source, name, options = {}) {
   state.revealedCovers.clear();
   state.pageViews.clear();
   state.totalCovers = 0;
+  state.documentReady = false;
+  state.renderDocumentPromise = null;
   if (!preserveEdits) {
     clearEdits({ rerender: false });
   } else {
@@ -321,17 +325,23 @@ async function renderDocument() {
   const token = ++state.renderToken;
   const { pdfDoc } = state;
   if (!pdfDoc) {
+    state.documentReady = false;
+    state.renderDocumentPromise = null;
+    updateControls();
     return;
   }
 
-  state.viewerWidth = getAvailableViewerWidth();
-  state.pageViews.clear();
-  state.totalCovers = 0;
-  els.viewer.replaceChildren();
-  els.emptyState.hidden = true;
-  setStatus(`${state.pdfName} を解析しています...`);
+  state.documentReady = false;
+  updateControls();
 
-  try {
+  const task = (async () => {
+    state.viewerWidth = getAvailableViewerWidth();
+    state.pageViews.clear();
+    state.totalCovers = 0;
+    els.viewer.replaceChildren();
+    els.emptyState.hidden = true;
+    setStatus(`${state.pdfName} を解析しています...`);
+
     for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
       if (token !== state.renderToken) {
         return;
@@ -343,18 +353,48 @@ async function renderDocument() {
       els.viewer.append(shell);
     }
 
-    if (token === state.renderToken) {
-      setStatus(
-        `${state.pdfName}: ${pdfDoc.numPages}ページ / 白い被せ物 ${state.totalCovers} 個を検出`,
-      );
-      updateControls();
+    if (token !== state.renderToken) {
+      return;
     }
+
+    state.documentReady = state.pageViews.size === pdfDoc.numPages;
+    setStatus(
+      `${state.pdfName}: ${pdfDoc.numPages}ページ / 白い被せ物 ${state.totalCovers} 個を検出`,
+    );
+    updateControls();
+  })();
+
+  state.renderDocumentPromise = task;
+  try {
+    await task;
   } catch (error) {
     console.error(error);
     if (token === state.renderToken) {
+      state.documentReady = false;
       setStatus(`${state.pdfName} のプレビュー生成に失敗しました。`, "error");
       updateControls();
     }
+  } finally {
+    if (state.renderDocumentPromise === task) {
+      state.renderDocumentPromise = null;
+    }
+  }
+}
+
+function isDocumentFullyRendered() {
+  const { pdfDoc } = state;
+  if (!pdfDoc || !state.documentReady) {
+    return false;
+  }
+  return state.pageViews.size === pdfDoc.numPages;
+}
+
+async function ensureDocumentReady() {
+  if (state.renderDocumentPromise) {
+    await state.renderDocumentPromise;
+  }
+  if (!isDocumentFullyRendered()) {
+    throw new Error("Document analysis is not complete");
   }
 }
 
@@ -466,13 +506,22 @@ async function paintPdfPage(page, pageNumber, viewport, renderScale, outputScale
 
 async function downloadModifiedPdf() {
   const { pdfDoc, pdfName } = state;
-  if (!pdfDoc || state.pageViews.size === 0) {
+  if (!pdfDoc) {
     return;
   }
 
   const token = state.renderToken;
   els.downloadRasterButton.disabled = true;
   els.downloadVectorButton.disabled = true;
+
+  try {
+    await ensureDocumentReady();
+  } catch {
+    setStatus("PDFの解析が完了するまでお待ちください。", "error");
+    updateControls();
+    return;
+  }
+
   setStatus("PDFを作成しています（画像）...");
 
   try {
@@ -559,14 +608,23 @@ function buildRevealedCoversForExport() {
 }
 
 async function downloadModifiedPdfVector() {
-  const { pdfBytes, pdfName } = state;
-  if (!pdfBytes || state.pageViews.size === 0) {
+  const { pdfBytes, pdfName, pdfDoc } = state;
+  if (!pdfBytes || !pdfDoc) {
     return;
   }
 
   const token = state.renderToken;
   els.downloadRasterButton.disabled = true;
   els.downloadVectorButton.disabled = true;
+
+  try {
+    await ensureDocumentReady();
+  } catch {
+    setStatus("PDFの解析が完了するまでお待ちください。", "error");
+    updateControls();
+    return;
+  }
+
   setStatus("PDFを作成しています（ベクター）...");
 
   try {
@@ -1187,9 +1245,10 @@ function wireUndoRedo() {
 
 function updateControls() {
   const hasPdf = Boolean(state.pdfDoc);
+  const canExport = hasPdf && isDocumentFullyRendered();
   const hasEdits = state.textEdits.length > 0 || state.imagePlacements.length > 0;
-  els.downloadRasterButton.disabled = !hasPdf;
-  els.downloadVectorButton.disabled = !hasPdf || !state.pdfBytes;
+  els.downloadRasterButton.disabled = !canExport;
+  els.downloadVectorButton.disabled = !canExport || !state.pdfBytes;
   els.resetButton.disabled = !hasPdf;
   els.coverCount.textContent = String(state.totalCovers);
 
