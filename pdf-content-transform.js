@@ -6,6 +6,7 @@ import {
   PDFRef,
   decodePDFRawStream,
 } from "./pdf-lib-shim.js";
+import { recolorJpegImageBytes, resolveImageRecolorEnv } from "./image-xobject-recolor.js";
 
 const OPERATORS = new Set([
   "b",
@@ -126,6 +127,10 @@ export function makeCoverKey(pageNumber, pdfBBox) {
 export async function transformPdfContent(pdfDoc, options) {
   if (!needsContentStreamTransform(options)) {
     return;
+  }
+
+  if (options.recolorText && !options.imageRecolorEnv) {
+    options.imageRecolorEnv = await resolveImageRecolorEnv(options);
   }
 
   const context = pdfDoc.context;
@@ -364,6 +369,108 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
 
     await transformContentRefs([ref], context, formOptions);
   }
+
+  await transformImageXObjectsFromDict(resources, context, options);
+}
+
+async function transformImageXObjectsFromDict(resources, context, options) {
+  if (!options.recolorText) {
+    return;
+  }
+
+  const xObjectRef = resources.lookupMaybe(PDFName.of("XObject"), PDFDict);
+  if (!xObjectRef) {
+    return;
+  }
+
+  for (const [, ref] of xObjectRef.entries()) {
+    if (!(ref instanceof PDFRef)) {
+      continue;
+    }
+
+    const xObject = context.lookup(ref);
+    const subtype = xObject?.dict?.get(PDFName.of("Subtype"));
+    if (subtype?.toString() !== "/Image") {
+      continue;
+    }
+
+    if (options.processedStreams.has(ref)) {
+      continue;
+    }
+    options.processedStreams.add(ref);
+
+    await transformOneImageXObject(ref, xObject, context, options);
+  }
+}
+
+async function transformOneImageXObject(ref, stream, context, options) {
+  const dict = stream.dict;
+  if (dict.get(PDFName.of("ImageMask")) || dict.get(PDFName.of("SMask"))) {
+    return;
+  }
+
+  const filterName = getImageFilterName(dict);
+  if (filterName !== "/DCTDecode") {
+    return;
+  }
+
+  const colorSpace = dict.get(PDFName.of("ColorSpace"));
+  if (colorSpace?.toString?.() !== "/DeviceRGB") {
+    return;
+  }
+
+  const imageBytes = stream.getContents();
+  if (!imageBytes || imageBytes.length === 0) {
+    return;
+  }
+
+  const recoloredBytes = await recolorJpegImageBytes(
+    imageBytes,
+    options,
+    options.imageRecolorEnv,
+  );
+  if (!recoloredBytes || areSameBytes(imageBytes, recoloredBytes)) {
+    return;
+  }
+
+  replaceRawImageStreamContents(context, ref, recoloredBytes, stream);
+}
+
+function getImageFilterName(dict) {
+  const filterEntry = dict.get(PDFName.of("Filter"));
+  if (!filterEntry) {
+    return null;
+  }
+  if (filterEntry instanceof PDFName) {
+    return filterEntry.toString();
+  }
+  if (filterEntry instanceof PDFArray) {
+    const first = filterEntry.asArray()[0];
+    return first?.toString?.() ?? null;
+  }
+  return null;
+}
+
+function areSameBytes(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function replaceRawImageStreamContents(context, ref, bytes, originalStream) {
+  const newStream = context.stream(bytes);
+  for (const [key, value] of originalStream.dict.entries()) {
+    if (key !== PDFName.of("Length")) {
+      newStream.dict.set(key, value);
+    }
+  }
+  context.assign(ref, newStream);
 }
 
 function readFormBBox(dict) {
@@ -541,6 +648,8 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     colorSpaceResolver: inheritedState?.colorSpaceResolver ?? null,
     fillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
     strokeColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
+    lastKnownFillColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
+    lastKnownStrokeColor: { r: 0, g: 0, b: 0, gray: 0, kind: "rgb" },
     fillColorSpace: "DeviceGray",
     strokeColorSpace: "DeviceGray",
     lastRect: null,
@@ -576,24 +685,28 @@ function updateGraphicsState(tokens, index, state, token) {
   if (token === "rg") {
     const args = readNumberArgs(tokens, index, 3);
     state.fillColor = { kind: "rgb", r: args[0], g: args[1], b: args[2] };
+    state.lastKnownFillColor = state.fillColor;
     return;
   }
 
   if (token === "RG") {
     const args = readNumberArgs(tokens, index, 3);
     state.strokeColor = { kind: "rgb", r: args[0], g: args[1], b: args[2] };
+    state.lastKnownStrokeColor = state.strokeColor;
     return;
   }
 
   if (token === "g") {
     const gray = readNumberArgs(tokens, index, 1)[0];
     state.fillColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
+    state.lastKnownFillColor = state.fillColor;
     return;
   }
 
   if (token === "G") {
     const gray = readNumberArgs(tokens, index, 1)[0];
     state.strokeColor = { kind: "gray", gray, r: gray, g: gray, b: gray };
+    state.lastKnownStrokeColor = state.strokeColor;
     return;
   }
 
@@ -604,6 +717,7 @@ function updateGraphicsState(tokens, index, state, token) {
     const g = (1 - m) * (1 - kVal);
     const b = (1 - y) * (1 - kVal);
     state.fillColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
+    state.lastKnownFillColor = state.fillColor;
     return;
   }
 
@@ -614,6 +728,7 @@ function updateGraphicsState(tokens, index, state, token) {
     const g = (1 - m) * (1 - kVal);
     const b = (1 - y) * (1 - kVal);
     state.strokeColor = { kind: "cmyk", c, m, y, k: kVal, r, g, b };
+    state.lastKnownStrokeColor = state.strokeColor;
     return;
   }
 
@@ -702,12 +817,18 @@ function updateGraphicsState(tokens, index, state, token) {
   if (token === "sc" || token === "scn") {
     const colorInfo = readColorFromOperator(tokens, index, token, state.fillColorSpace);
     state.fillColor = colorInfo.kind === "unknown" ? { kind: "unknown" } : colorInfo;
+    if (colorInfo.kind !== "unknown") {
+      state.lastKnownFillColor = state.fillColor;
+    }
     return;
   }
 
   if (token === "SC" || token === "SCN") {
     const colorInfo = readColorFromOperator(tokens, index, token, state.strokeColorSpace);
     state.strokeColor = colorInfo.kind === "unknown" ? { kind: "unknown" } : colorInfo;
+    if (colorInfo.kind !== "unknown") {
+      state.lastKnownStrokeColor = state.strokeColor;
+    }
     return;
   }
 
@@ -1161,19 +1282,67 @@ export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
     && area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
 }
 
-function shouldRecolorFillAtPaint(state, options) {
-  const pathInfo = getPaintPathInfo(state);
-  if (!shouldRecolorNearWhiteFillPath(pathInfo, options)) {
+function effectiveFillColorForPaint(state) {
+  if (state.fillColor?.kind !== "unknown") {
+    return state.fillColor;
+  }
+  return state.lastKnownFillColor ?? state.fillColor;
+}
+
+function shouldRecolorOutlineGlyphFill(pathInfo) {
+  if (pathInfo.isSimpleRectPath || pathInfo.rectCount > 0) {
     return false;
   }
 
-  if (isNearWhiteColor(state.fillColor, getFillThreshold(options))) {
+  if (pathInfo.hasCurve) {
     return true;
   }
 
-  // Curved outline symbols (matrix brackets, etc.) are drawn white in the
-  // source PDF but unrelated operators may change the active fill before f/f*.
-  return Boolean(pathInfo.hasCurve && pathInfo.pathOps >= 3);
+  const bbox = pathInfo.bbox;
+  if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
+    return false;
+  }
+
+  const minDim = Math.min(bbox.w, bbox.h);
+  const maxDim = Math.max(bbox.w, bbox.h);
+  if (pathInfo.pathOps >= MIN_OUTLINE_SYMBOL_OPS && minDim > 0 && maxDim / minDim >= LINEAR_SYMBOL_ASPECT_RATIO) {
+    return true;
+  }
+
+  const area = bbox.w * bbox.h;
+  return pathInfo.pathOps >= MIN_OUTLINE_SYMBOL_OPS && area > 0 && area < SMALL_WHITE_ELEMENT_MAX_PDF_AREA;
+}
+
+function isNeutralFillColor(color) {
+  if (!color || color.kind === "unknown") {
+    return false;
+  }
+  const { r, g, b } = normalizeColor(color);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max - min < 0.05;
+}
+
+function shouldRecolorFillAtPaint(state, options) {
+  const pathInfo = getPaintPathInfo(state);
+  const threshold = getFillThreshold(options);
+  const fillColor = effectiveFillColorForPaint(state);
+  const isNearWhite = isNearWhiteColor(fillColor, threshold)
+    || (fillColor?.kind === "unknown" && isNearWhiteColor(state.lastKnownFillColor, threshold));
+
+  if (isNearWhite) {
+    if (shouldRecolorNearWhiteFillPath(pathInfo, options)) {
+      return true;
+    }
+    return shouldRecolorOutlineGlyphFill(pathInfo);
+  }
+
+  // White outline glyphs may keep a stale neutral gray fill right before f/f*.
+  if (isNeutralFillColor(fillColor) && shouldRecolorOutlineGlyphFill(pathInfo)) {
+    return true;
+  }
+
+  return false;
 }
 
 function tryRecolorStandaloneColorOperator(tokens, operatorIndex, state, options, output) {
@@ -1853,6 +2022,8 @@ function cloneGraphicsState(state) {
     stack: [],
     fillColor: cloneColorState(state.fillColor),
     strokeColor: cloneColorState(state.strokeColor),
+    lastKnownFillColor: cloneColorState(state.lastKnownFillColor ?? state.fillColor),
+    lastKnownStrokeColor: cloneColorState(state.lastKnownStrokeColor ?? state.strokeColor),
     colorSpaceResolver: state.colorSpaceResolver,
     fillColorSpace: state.fillColorSpace,
     strokeColorSpace: state.strokeColorSpace,
@@ -1870,6 +2041,8 @@ function restoreGraphicsState(state, saved) {
   state.ctm = saved.ctm;
   state.fillColor = saved.fillColor;
   state.strokeColor = saved.strokeColor;
+  state.lastKnownFillColor = saved.lastKnownFillColor;
+  state.lastKnownStrokeColor = saved.lastKnownStrokeColor;
   state.colorSpaceResolver = saved.colorSpaceResolver;
   state.fillColorSpace = saved.fillColorSpace;
   state.strokeColorSpace = saved.strokeColorSpace;

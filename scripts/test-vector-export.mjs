@@ -1083,7 +1083,66 @@ async function main() {
     }
   }
 
+  await testLecturePdfImageRecolor();
+
   console.log("\nAll tests passed.");
+}
+
+async function testLecturePdfImageRecolor() {
+  const lecturePath = "main.pdf";
+  let lectureBytes;
+  try {
+    lectureBytes = readFileSync(lecturePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.log(`Skip: ${lecturePath} not found`);
+      return;
+    }
+    throw error;
+  }
+
+  const { PDFDict, PDFRawStream, decodePDFRawStream } = await import("pdf-lib");
+  const beforeDoc = await PDFDocument.load(lectureBytes.slice());
+  const afterDoc = await PDFDocument.load(lectureBytes.slice());
+  await transformPdfContent(afterDoc, {
+    recolorText: true,
+    textColor: "#dd1133",
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+  });
+
+  const imageRef = [...beforeDoc.context
+    .lookup(beforeDoc.getPages()[3].node.get(PDFName.of("Resources")), PDFDict)
+    .lookup(PDFName.of("XObject"), PDFDict)
+    .entries()].find(([name]) => name.toString() === "/Image46")?.[1];
+  if (!imageRef) {
+    throw new Error("Expected /Image46 on page 4 of main.pdf");
+  }
+
+  const beforeImage = beforeDoc.context.lookup(imageRef, PDFRawStream).getContents();
+  const afterImage = afterDoc.context.lookup(imageRef, PDFRawStream).getContents();
+  if (
+    beforeImage.length === afterImage.length
+    && Buffer.compare(Buffer.from(beforeImage), Buffer.from(afterImage)) === 0
+  ) {
+    throw new Error("JPEG figure /Image46 was not recolored in vector export");
+  }
+
+  const meta65Ref = [...beforeDoc.context
+    .lookup(beforeDoc.getPages()[7].node.get(PDFName.of("Resources")), PDFDict)
+    .lookup(PDFName.of("XObject"), PDFDict)
+    .entries()].find(([name]) => name.toString() === "/Meta65")?.[1];
+  if (meta65Ref) {
+    const meta65Tokens = tokenizeContentStream(
+      decodePDFRawStream(afterDoc.context.lookup(meta65Ref, PDFRawStream)).decode(),
+    );
+    if (meta65Tokens.includes("0.867") && meta65Tokens.includes("0.067") && meta65Tokens.includes("0.2")) {
+      throw new Error("Colored vector diagram /Meta65 should not be recolored as white text");
+    }
+  }
+
+  console.log("OK: JPEG figure XObjects recolor while colored vector diagrams stay intact");
 }
 
 main().catch((error) => {
