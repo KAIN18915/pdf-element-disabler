@@ -762,14 +762,10 @@ async function testFormInheritedWhiteTextRecolor() {
   if (!text.includes(`${TARGET_RGB} rg`)) {
     throw new Error(`Expected inherited white form text to be recolored: ${text}`);
   }
-  const inlinedSegment = text.slice(text.indexOf("q"));
-  if (inlinedSegment.includes("1 1 1 rg") && inlinedSegment.includes("Tj")) {
-    throw new Error(`Form text still uses near-white fill before Tj: ${text}`);
+  if (!text.includes("/Fm0 Do")) {
+    throw new Error(`Expected Form XObject Do to remain intact: ${text}`);
   }
-  if (text.includes("/Fm0 Do")) {
-    throw new Error(`Expected Form XObject to be inlined during recolor: ${text}`);
-  }
-  console.log("OK: inherited white text in Form XObject recolored at Do inline");
+  console.log("OK: inherited white text in Form XObject recolored via parent fill color");
 }
 
 async function testFormInheritedWhiteStrokeRecolor() {
@@ -800,10 +796,10 @@ async function testFormInheritedWhiteStrokeRecolor() {
     formResolver,
   });
   const text = new TextDecoder("latin1").decode(transformed);
-  if (!text.includes(`${TARGET_RGB} RG S`)) {
+  if (!text.includes(`${TARGET_RGB} RG /Fm0 Do`)) {
     throw new Error(`Expected inherited white bracket stroke to be recolored: ${text}`);
   }
-  console.log("OK: inherited white matrix stroke in Form XObject recolored");
+  console.log("OK: inherited white matrix stroke in Form XObject recolored via parent stroke color");
 }
 
 async function testPathBackgroundPreserved() {
