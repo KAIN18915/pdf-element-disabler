@@ -145,14 +145,9 @@ export async function transformPdfContent(pdfDoc, options) {
       pageArea: width * height,
       processedStreams,
       colorSpaceResolver: createColorSpaceResolver(resourcesRef, context),
-      formResolver: options.recolorText
-        ? createFormResolver(resourcesRef, context)
-        : null,
     };
 
-    if (!options.recolorText) {
-      await transformResourceXObjects(page.node, context, transformOptions);
-    }
+    await transformResourceXObjects(page.node, context, transformOptions);
     await transformContentRefs(getPageContentRefs(page, context), context, transformOptions);
   }
 }
@@ -353,14 +348,16 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
     }
 
     const bbox = readFormBBox(xObject.dict);
+    const nestedResourcesRef = xObject.dict.lookupMaybe(PDFName.of("Resources"), PDFDict);
     const formOptions = {
       ...options,
       pageWidth: bbox.width,
       pageHeight: bbox.height,
       pageArea: bbox.width * bbox.height,
+      colorSpaceResolver: createColorSpaceResolver(nestedResourcesRef, context),
     };
 
-    const nestedResources = xObject.dict.lookupMaybe(PDFName.of("Resources"), PDFDict);
+    const nestedResources = nestedResourcesRef;
     if (nestedResources) {
       await transformResourceXObjectsFromDict(nestedResources, context, formOptions);
     }
@@ -508,28 +505,9 @@ function transformContentBytes(bytes, options) {
         continue;
       }
 
-      if (token === "Do" && options.recolorText && options.formResolver) {
-        const formInfo = options.formResolver(tokens[index - 1]);
-        if (formInfo) {
-          if (output.length > 0 && output[output.length - 1] === tokens[index - 1]) {
-            output.pop();
-          }
-          output.push("q");
-          const formOptions = {
-            ...options,
-            inheritedGraphicsState: cloneGraphicsState(state),
-            pageWidth: formInfo.width,
-            pageHeight: formInfo.height,
-            pageArea: formInfo.width * formInfo.height,
-            colorSpaceResolver: formInfo.colorSpaceResolver,
-            formResolver: formInfo.nestedFormResolver,
-          };
-          const nestedBytes = transformContentBytes(formInfo.bytes, formOptions);
-          output.push(...tokenizeContentStream(nestedBytes));
-          output.push("Q");
-          index += 1;
-          continue;
-        }
+      if (tryRecolorStandaloneColorOperator(tokens, index, state, options, output)) {
+        index += 1;
+        continue;
       }
 
       if (options.recolorText && tryInjectRecolorBeforePaint(tokens, index, token, state, options, output)) {
@@ -1196,6 +1174,90 @@ function shouldRecolorFillAtPaint(state, options) {
   // Curved outline symbols (matrix brackets, etc.) are drawn white in the
   // source PDF but unrelated operators may change the active fill before f/f*.
   return Boolean(pathInfo.hasCurve && pathInfo.pathOps >= 3);
+}
+
+function tryRecolorStandaloneColorOperator(tokens, operatorIndex, state, options, output) {
+  if (!options.recolorText) {
+    return false;
+  }
+
+  const token = tokens[operatorIndex];
+  if (!FILL_COLOR_OPERATORS.has(token) && !STROKE_COLOR_OPERATORS.has(token)) {
+    return false;
+  }
+
+  if (!isColorForFormInvocation(tokens, operatorIndex)) {
+    return false;
+  }
+
+  const isStroke = STROKE_COLOR_OPERATORS.has(token);
+  const colorSpace = isStroke ? state.strokeColorSpace : state.fillColorSpace;
+  const colorInfo = readColorFromOperator(tokens, operatorIndex, token, colorSpace);
+  const argCount = colorInfo.argCount ?? 0;
+  const threshold = isStroke ? getStrokeThreshold(options) : getFillThreshold(options);
+
+  if (argCount > 0) {
+    output.length -= argCount;
+  }
+
+  if (
+    colorInfo.kind !== "unknown"
+    && isNearWhite(colorInfo.r, colorInfo.g, colorInfo.b, threshold)
+  ) {
+    const target = hexToPdfRgb(options.textColor ?? "#dd1133");
+    const outOp = isStroke ? "RG" : "rg";
+    const recolored = { kind: "rgb", r: target[0], g: target[1], b: target[2] };
+    if (isStroke) {
+      state.strokeColor = recolored;
+    } else {
+      state.fillColor = recolored;
+    }
+    output.push(
+      formatNumber(target[0]),
+      formatNumber(target[1]),
+      formatNumber(target[2]),
+      outOp,
+    );
+    return true;
+  }
+
+  if (argCount > 0) {
+    for (let argIndex = operatorIndex - argCount; argIndex < operatorIndex; argIndex += 1) {
+      output.push(tokens[argIndex]);
+    }
+  }
+  output.push(token);
+  if (colorInfo.kind !== "unknown") {
+    if (isStroke) {
+      state.strokeColor = colorInfo;
+    } else {
+      state.fillColor = colorInfo;
+    }
+  } else if (isStroke) {
+    state.strokeColor = { kind: "unknown" };
+  } else {
+    state.fillColor = { kind: "unknown" };
+  }
+  return true;
+}
+
+function isColorForFormInvocation(tokens, operatorIndex) {
+  let cursor = operatorIndex + 1;
+  while (cursor < tokens.length) {
+    const token = tokens[cursor];
+    if (isRawSegment(token)) {
+      cursor += 1;
+      continue;
+    }
+    if (token === "Do") {
+      return true;
+    }
+    if (isOperator(token)) {
+      return false;
+    }
+    cursor += 1;
+  }
+  return false;
 }
 
 function tryInjectRecolorBeforePaint(tokens, operatorIndex, token, state, options, output) {
