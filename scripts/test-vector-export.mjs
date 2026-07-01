@@ -1083,12 +1083,78 @@ async function main() {
     }
   }
 
-  await testLecturePdfImageRecolor();
+  await testLecturePdfImagePreserved();
+  await testImageRecolorSkippedWithRecolorText();
 
   console.log("\nAll tests passed.");
 }
 
-async function testLecturePdfImageRecolor() {
+async function assertImageXObjectsUnchanged(beforeDoc, afterDoc, label) {
+  const { PDFDict, PDFRawStream } = await import("pdf-lib");
+  for (let pageIndex = 0; pageIndex < beforeDoc.getPageCount(); pageIndex += 1) {
+    const page = beforeDoc.getPages()[pageIndex];
+    const resources = beforeDoc.context.lookupMaybe(page.node.get(PDFName.of("Resources")), PDFDict);
+    const xObjects = resources?.lookupMaybe(PDFName.of("XObject"), PDFDict);
+    if (!xObjects) {
+      continue;
+    }
+
+    for (const [name, ref] of xObjects.entries()) {
+      const stream = beforeDoc.context.lookupMaybe(ref, PDFRawStream);
+      if (!stream) {
+        continue;
+      }
+      const subtype = stream.dict.get(PDFName.of("Subtype"))?.toString();
+      if (subtype !== "/Image") {
+        continue;
+      }
+
+      const beforeBytes = stream.getContents();
+      const afterBytes = afterDoc.context.lookup(ref, PDFRawStream).getContents();
+      if (
+        beforeBytes.length !== afterBytes.length
+        || Buffer.compare(Buffer.from(beforeBytes), Buffer.from(afterBytes)) !== 0
+      ) {
+        throw new Error(`${label}: image ${name.toString()} on page ${pageIndex + 1} was modified`);
+      }
+    }
+  }
+}
+
+async function testImageRecolorSkippedWithRecolorText() {
+  const graphicsBytes = await makeGraphicsPdf();
+  const beforeDoc = await PDFDocument.load(graphicsBytes.slice());
+  const afterDoc = await PDFDocument.load(graphicsBytes.slice());
+  await transformPdfContent(afterDoc, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+  });
+
+  await assertImageXObjectsUnchanged(beforeDoc, afterDoc, "Graphics PDF with recolorText");
+
+  const pngBytes = makeTinyPng();
+  await testVectorExport("Image placement with recolorText", graphicsBytes, {
+    recolorText: true,
+    imagePlacements: [
+      {
+        pageNumber: 1,
+        x: 300,
+        y: 300,
+        width: 40,
+        height: 40,
+        imageBytes: pngBytes,
+        mimeType: "image/png",
+      },
+    ],
+  });
+
+  console.log("OK: image XObjects stay unchanged during vector export with recolorText");
+}
+
+async function testLecturePdfImagePreserved() {
   const lecturePath = "main.pdf";
   let lectureBytes;
   try {
@@ -1123,11 +1189,13 @@ async function testLecturePdfImageRecolor() {
   const beforeImage = beforeDoc.context.lookup(imageRef, PDFRawStream).getContents();
   const afterImage = afterDoc.context.lookup(imageRef, PDFRawStream).getContents();
   if (
-    beforeImage.length === afterImage.length
-    && Buffer.compare(Buffer.from(beforeImage), Buffer.from(afterImage)) === 0
+    beforeImage.length !== afterImage.length
+    || Buffer.compare(Buffer.from(beforeImage), Buffer.from(afterImage)) !== 0
   ) {
-    throw new Error("JPEG figure /Image46 was not recolored in vector export");
+    throw new Error("JPEG figure /Image46 was recolored during vector export");
   }
+
+  await assertImageXObjectsUnchanged(beforeDoc, afterDoc, "main.pdf lecture export");
 
   const meta65Ref = [...beforeDoc.context
     .lookup(beforeDoc.getPages()[7].node.get(PDFName.of("Resources")), PDFDict)
@@ -1142,7 +1210,7 @@ async function testLecturePdfImageRecolor() {
     }
   }
 
-  console.log("OK: JPEG figure XObjects recolor while colored vector diagrams stay intact");
+  console.log("OK: JPEG figure XObjects stay unchanged; colored vector diagrams stay intact");
 }
 
 main().catch((error) => {
