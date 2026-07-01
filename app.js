@@ -847,7 +847,14 @@ function instrumentContext(ctx, info) {
     if (coverMeta.isAxisAlignedRect || coverMeta.rectCount > 0) {
       return false;
     }
-    if (coverMeta.hasCurve && !isComplexWhiteShapeCover(coverMeta)) {
+    const pathInfo = {
+      ...coverMeta,
+      bbox: pdfBBox,
+      hasCurve: Boolean(coverMeta.hasCurve),
+      pathOps: coverMeta.pathOps ?? 0,
+      subpathCount: coverMeta.subpathCount ?? 0,
+    };
+    if (coverMeta.hasCurve && !isComplexWhiteShapeCover(pathInfo)) {
       return true;
     }
     if (coverMeta.pathOps >= 6 && isLinearWhiteSymbol(cssBox)) {
@@ -902,6 +909,7 @@ function instrumentContext(ctx, info) {
         bbox: pdfBBox,
         pathOps: coverMeta.pathOps ?? 0,
         rectCount: coverMeta.rectCount ?? 0,
+        subpathCount: coverMeta.subpathCount ?? 0,
         hasCurve: Boolean(coverMeta.hasCurve),
         isSimpleRectPath: Boolean(coverMeta.isAxisAlignedRect),
       },
