@@ -93,6 +93,7 @@ const LINEAR_SYMBOL_ASPECT_RATIO = 6;
 const PAGE_BACKGROUND_AREA_RATIO = 0.9;
 const MIN_OUTLINE_SYMBOL_OPS = 6;
 const MAX_OUTLINE_SYMBOL_AREA = 8000;
+export const MIN_SPEECH_BUBBLE_PATH_OPS = 15;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
 const TEXT_SHOW_OPERATORS = new Set(["Tj", "TJ", "'", '"']);
@@ -1140,6 +1141,10 @@ function shouldRecolorStrokeAtPaint(state, options) {
   return shouldRecolorNearWhiteStroke(rect, state.lineWidth ?? 1, options);
 }
 
+export function isComplexWhiteShapeCover(pathInfo) {
+  return Boolean(pathInfo?.hasCurve) && (pathInfo.pathOps ?? 0) >= MIN_SPEECH_BUBBLE_PATH_OPS;
+}
+
 export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
   const bbox = pathInfo?.bbox;
   if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
@@ -1154,6 +1159,10 @@ export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
     return false;
   }
 
+  if (isComplexWhiteShapeCover(pathInfo)) {
+    return false;
+  }
+
   const area = bbox.w * bbox.h;
   if (area <= 0 || area > MAX_OUTLINE_SYMBOL_AREA) {
     return false;
@@ -1163,7 +1172,7 @@ export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
     return true;
   }
 
-  if (pathInfo.hasCurve && pathInfo.pathOps >= 3) {
+  if (pathInfo.hasCurve && pathInfo.pathOps >= 3 && !isWhiteCoverRect(bbox, options)) {
     return true;
   }
 
@@ -1187,7 +1196,7 @@ function shouldRecolorOutlineGlyphFill(pathInfo) {
     return false;
   }
 
-  if (pathInfo.hasCurve) {
+  if (pathInfo.hasCurve && !isComplexWhiteShapeCover(pathInfo)) {
     return true;
   }
 
@@ -1989,6 +1998,7 @@ export const __test__ = {
   isPageBackgroundBbox,
   isBracketLikeBbox,
   shouldRecolorNearWhiteFillPath,
+  isComplexWhiteShapeCover,
   shouldRecolorNearWhiteStroke,
   shouldRecolorStrokeAtPaint,
   createGraphicsState,
