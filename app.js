@@ -2,6 +2,7 @@ import "./path2d-tracker.js";
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/legacy/build/pdf.mjs";
 import * as pdfLib from "./pdf-lib-shim.js";
 import {
+  isComplexWhiteShapeCover,
   isPageBackgroundBbox,
   makeCoverKey,
   needsContentStreamTransform,
@@ -846,7 +847,7 @@ function instrumentContext(ctx, info) {
     if (coverMeta.isAxisAlignedRect || coverMeta.rectCount > 0) {
       return false;
     }
-    if (coverMeta.hasCurve) {
+    if (coverMeta.hasCurve && !isComplexWhiteShapeCover(coverMeta)) {
       return true;
     }
     if (coverMeta.pathOps >= 6 && isLinearWhiteSymbol(cssBox)) {

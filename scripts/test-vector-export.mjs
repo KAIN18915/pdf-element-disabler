@@ -731,6 +731,51 @@ async function testCurvedOutlineFillWithStaleFillColor() {
   console.log("OK: curved outline f* recolors even when active fill is no longer white");
 }
 
+async function testSpeechBubbleCoverPreserved() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 720,
+    pageHeight: 540,
+    pageArea: 720 * 540,
+  };
+
+  const speechBubblePath = [
+    "1 1 1 rg",
+    "575.457 393.5201 m",
+    "575.457 397.7817 578.9117 401.2364 583.1733 401.2364 c",
+    "598.1367 401.2364 l",
+    "632.1562 401.2364 l",
+    "703.8188 401.2364 l",
+    "708.0804 401.2364 711.5351 397.7817 711.5351 393.5201 c",
+    "711.5351 381.946 l",
+    "711.5351 362.6557 l",
+    "711.5351 358.3941 708.0804 354.9394 703.8188 354.9394 c",
+    "632.1562 354.9394 l",
+    "598.1367 354.9394 l",
+    "583.1733 354.9394 l",
+    "578.9117 354.9394 575.457 358.3941 575.457 362.6557 c",
+    "575.457 381.946 l",
+    "575.457 393.5201 l",
+    "h f*",
+  ].join(" ");
+
+  const stream = transformContentBytes(new TextEncoder().encode(`${speechBubblePath}\n`), opts);
+  const text = new TextDecoder("latin1").decode(stream);
+  if (text.includes(`${TARGET_RGB} rg f*`)) {
+    throw new Error(`Speech-bubble white fill was recolored: ${text}`);
+  }
+  if (!text.includes("1 1 1 rg") || !text.includes("f*")) {
+    throw new Error(`Speech-bubble fill was altered unexpectedly: ${text}`);
+  }
+
+  console.log("OK: speech-bubble white fills with many curves stay white");
+}
+
 async function testFormInheritedWhiteTextRecolor() {
   const formBytes = new TextEncoder().encode("BT /F1 12 Tf 10 20 Td (Hidden) Tj ET\n");
   const pageBytes = new TextEncoder().encode("1 1 1 rg /Fm0 Do\n");
@@ -996,6 +1041,7 @@ async function main() {
   await testIccBasedRgbColorSpaceRecolor();
   await testWhiteOutlineFillRecolor();
   await testCurvedOutlineFillWithStaleFillColor();
+  await testSpeechBubbleCoverPreserved();
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
