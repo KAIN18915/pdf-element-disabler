@@ -6,7 +6,6 @@ import {
   PDFRef,
   decodePDFRawStream,
 } from "./pdf-lib-shim.js";
-import { recolorJpegImageBytes, resolveImageRecolorEnv } from "./image-xobject-recolor.js";
 
 const OPERATORS = new Set([
   "b",
@@ -127,10 +126,6 @@ export function makeCoverKey(pageNumber, pdfBBox) {
 export async function transformPdfContent(pdfDoc, options) {
   if (!needsContentStreamTransform(options)) {
     return;
-  }
-
-  if (options.recolorText && !options.imageRecolorEnv) {
-    options.imageRecolorEnv = await resolveImageRecolorEnv(options);
   }
 
   const context = pdfDoc.context;
@@ -369,108 +364,6 @@ async function transformResourceXObjectsFromDict(resources, context, options) {
 
     await transformContentRefs([ref], context, formOptions);
   }
-
-  await transformImageXObjectsFromDict(resources, context, options);
-}
-
-async function transformImageXObjectsFromDict(resources, context, options) {
-  if (!options.recolorText) {
-    return;
-  }
-
-  const xObjectRef = resources.lookupMaybe(PDFName.of("XObject"), PDFDict);
-  if (!xObjectRef) {
-    return;
-  }
-
-  for (const [, ref] of xObjectRef.entries()) {
-    if (!(ref instanceof PDFRef)) {
-      continue;
-    }
-
-    const xObject = context.lookup(ref);
-    const subtype = xObject?.dict?.get(PDFName.of("Subtype"));
-    if (subtype?.toString() !== "/Image") {
-      continue;
-    }
-
-    if (options.processedStreams.has(ref)) {
-      continue;
-    }
-    options.processedStreams.add(ref);
-
-    await transformOneImageXObject(ref, xObject, context, options);
-  }
-}
-
-async function transformOneImageXObject(ref, stream, context, options) {
-  const dict = stream.dict;
-  if (dict.get(PDFName.of("ImageMask")) || dict.get(PDFName.of("SMask"))) {
-    return;
-  }
-
-  const filterName = getImageFilterName(dict);
-  if (filterName !== "/DCTDecode") {
-    return;
-  }
-
-  const colorSpace = dict.get(PDFName.of("ColorSpace"));
-  if (colorSpace?.toString?.() !== "/DeviceRGB") {
-    return;
-  }
-
-  const imageBytes = stream.getContents();
-  if (!imageBytes || imageBytes.length === 0) {
-    return;
-  }
-
-  const recoloredBytes = await recolorJpegImageBytes(
-    imageBytes,
-    options,
-    options.imageRecolorEnv,
-  );
-  if (!recoloredBytes || areSameBytes(imageBytes, recoloredBytes)) {
-    return;
-  }
-
-  replaceRawImageStreamContents(context, ref, recoloredBytes, stream);
-}
-
-function getImageFilterName(dict) {
-  const filterEntry = dict.get(PDFName.of("Filter"));
-  if (!filterEntry) {
-    return null;
-  }
-  if (filterEntry instanceof PDFName) {
-    return filterEntry.toString();
-  }
-  if (filterEntry instanceof PDFArray) {
-    const first = filterEntry.asArray()[0];
-    return first?.toString?.() ?? null;
-  }
-  return null;
-}
-
-function areSameBytes(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function replaceRawImageStreamContents(context, ref, bytes, originalStream) {
-  const newStream = context.stream(bytes);
-  for (const [key, value] of originalStream.dict.entries()) {
-    if (key !== PDFName.of("Length")) {
-      newStream.dict.set(key, value);
-    }
-  }
-  context.assign(ref, newStream);
 }
 
 function readFormBBox(dict) {
