@@ -94,6 +94,7 @@ const PAGE_BACKGROUND_AREA_RATIO = 0.9;
 const MIN_OUTLINE_SYMBOL_OPS = 6;
 const MAX_OUTLINE_SYMBOL_AREA = 8000;
 export const MIN_SPEECH_BUBBLE_PATH_OPS = 15;
+export const MIN_SPEECH_BUBBLE_AREA = 2500;
 const FILL_COLOR_OPERATORS = new Set(["rg", "g", "k", "sc", "scn"]);
 const STROKE_COLOR_OPERATORS = new Set(["RG", "G", "K", "SC", "SCN"]);
 const TEXT_SHOW_OPERATORS = new Set(["Tj", "TJ", "'", '"']);
@@ -551,6 +552,7 @@ function createGraphicsState(pageWidth, pageHeight, inheritedState = null) {
     lineWidth: 1,
     pathOps: 0,
     rectCount: 0,
+    subpathCount: 0,
     hasCurve: false,
     pathOutputStart: 0,
   };
@@ -565,6 +567,9 @@ function updateGraphicsState(tokens, index, state, token) {
   if (token === "Q") {
     if (state.stack.length > 0) {
       restoreGraphicsState(state, state.stack.pop());
+      // PDF restores the current path on Q, but our path classifier cannot
+      // reliably resume mid-path across nested q/Q and text blocks.
+      clearPathState(state);
     }
     return;
   }
@@ -640,7 +645,12 @@ function updateGraphicsState(tokens, index, state, token) {
   }
 
   if (token === "m") {
-    resetPathBBox(state);
+    const continuingSubpath = Boolean(state.pathBBox);
+    if (!continuingSubpath) {
+      resetPathBBox(state);
+      state.subpathCount = 0;
+    }
+    state.subpathCount = (state.subpathCount ?? 0) + 1;
     const args = readNumberArgs(tokens, index, 2);
     includePointInPathBBox(state, args[0], args[1]);
     state.lastRect = null;
@@ -1142,7 +1152,27 @@ function shouldRecolorStrokeAtPaint(state, options) {
 }
 
 export function isComplexWhiteShapeCover(pathInfo) {
-  return Boolean(pathInfo?.hasCurve) && (pathInfo.pathOps ?? 0) >= MIN_SPEECH_BUBBLE_PATH_OPS;
+  if (!pathInfo?.hasCurve) {
+    return false;
+  }
+
+  if ((pathInfo.pathOps ?? 0) >= MIN_SPEECH_BUBBLE_PATH_OPS) {
+    return true;
+  }
+
+  if ((pathInfo.subpathCount ?? 0) >= 2) {
+    return true;
+  }
+
+  const bbox = pathInfo.bbox;
+  if (bbox && Number.isFinite(bbox.w) && Number.isFinite(bbox.h)) {
+    const area = bbox.w * bbox.h;
+    if (area >= MIN_SPEECH_BUBBLE_AREA && !isBracketLikeBbox(bbox)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function shouldRecolorNearWhiteFillPath(pathInfo, options) {
@@ -1196,11 +1226,21 @@ function shouldRecolorOutlineGlyphFill(pathInfo) {
     return false;
   }
 
-  if (pathInfo.hasCurve && !isComplexWhiteShapeCover(pathInfo)) {
-    return true;
+  if (isComplexWhiteShapeCover(pathInfo)) {
+    return false;
   }
 
   const bbox = pathInfo.bbox;
+  if (pathInfo.hasCurve) {
+    if (bbox && Number.isFinite(bbox.w) && Number.isFinite(bbox.h)) {
+      const area = bbox.w * bbox.h;
+      if (area >= MIN_SPEECH_BUBBLE_AREA && !isBracketLikeBbox(bbox)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   if (!bbox || !Number.isFinite(bbox.w) || !Number.isFinite(bbox.h)) {
     return false;
   }
@@ -1413,6 +1453,7 @@ function getPaintPathInfo(state) {
     bbox: getPaintBbox(state),
     pathOps: state.pathOps ?? 0,
     rectCount: state.rectCount ?? 0,
+    subpathCount: state.subpathCount ?? 0,
     hasCurve: Boolean(state.hasCurve),
     isSimpleRectPath: Boolean(state.lastRect && state.rectCount === 1 && state.pathOps === 1),
   };
@@ -1423,6 +1464,7 @@ function clearPathState(state) {
   state.pathBBox = null;
   state.pathOps = 0;
   state.rectCount = 0;
+  state.subpathCount = 0;
   state.hasCurve = false;
 }
 
@@ -1932,9 +1974,6 @@ function cloneGraphicsState(state) {
     lastRect: state.lastRect ? { ...state.lastRect } : null,
     pathBBox: state.pathBBox ? { ...state.pathBBox } : null,
     lineWidth: state.lineWidth ?? 1,
-    pathOps: state.pathOps ?? 0,
-    rectCount: state.rectCount ?? 0,
-    hasCurve: Boolean(state.hasCurve),
     pathOutputStart: state.pathOutputStart ?? 0,
   };
 }
@@ -1951,9 +1990,6 @@ function restoreGraphicsState(state, saved) {
   state.lastRect = saved.lastRect;
   state.pathBBox = saved.pathBBox;
   state.lineWidth = saved.lineWidth ?? 1;
-  state.pathOps = saved.pathOps ?? 0;
-  state.rectCount = saved.rectCount ?? 0;
-  state.hasCurve = Boolean(saved.hasCurve);
   state.pathOutputStart = saved.pathOutputStart ?? 0;
 }
 

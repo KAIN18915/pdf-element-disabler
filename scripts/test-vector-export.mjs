@@ -776,6 +776,116 @@ async function testSpeechBubbleCoverPreserved() {
   console.log("OK: speech-bubble white fills with many curves stay white");
 }
 
+async function testMultiSubpathSpeechBubblePreserved() {
+  const opts = {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+    pageNumber: 1,
+    pageWidth: 720,
+    pageHeight: 540,
+    pageArea: 720 * 540,
+  };
+
+  const speechBubblePath = [
+    "1 1 1 rg",
+    "260.3111 344.7122 m",
+    "262.9706 343.2328 261.841 344.2109 260.3111 344.7122 c",
+    "h",
+    "170.256 345.4642 m",
+    "170.5197 344.7122 l",
+    "168.9962 344.2109 167.8683 343.2328 167.1359 341.7777 c",
+    "166.4035 340.3226 166.0373 338.4948 166.0373 336.2943 c",
+    "166.0373 334.0156 166.4035 332.1374 167.1359 330.6595 c",
+    "167.8683 329.1817 168.9865 328.1921 170.4904 327.6908 c",
+    "170.256 326.9388 l",
+    "168.3485 327.4401 166.8869 328.5192 165.8712 330.1761 c",
+    "164.8556 331.833 164.3478 333.8399 164.3478 336.1966 c",
+    "164.3478 338.5469 164.8572 340.5537 165.8761 342.2171 c",
+    "166.895 343.8805 168.355 344.9629 170.256 345.4642 c",
+    "h f*",
+  ].join(" ");
+
+  const stream = transformContentBytes(new TextEncoder().encode(`${speechBubblePath}\n`), opts);
+  const text = new TextDecoder("latin1").decode(stream);
+  if (text.includes(`${TARGET_RGB} rg f*`)) {
+    throw new Error(`Multi-subpath speech-bubble white fill was recolored: ${text}`);
+  }
+  if (!text.includes("1 1 1 rg") || !text.includes("f*")) {
+    throw new Error(`Multi-subpath speech-bubble fill was altered unexpectedly: ${text}`);
+  }
+
+  console.log("OK: multi-subpath speech-bubble white fills stay white");
+}
+
+async function testLecturePdfSpeechBubblesPreserved() {
+  const lecturePath = "ref/20260610-講義.pdf";
+  let lectureBytes;
+  try {
+    lectureBytes = readFileSync(lecturePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.log(`Skip: ${lecturePath} not found`);
+      return;
+    }
+    throw error;
+  }
+
+  const outDoc = await PDFDocument.load(lectureBytes.slice());
+  await transformPdfContent(outDoc, {
+    whiteThreshold: 238,
+    strokeWhiteThreshold: 220,
+    revealedCovers: new Set(),
+    recolorText: true,
+    textColor: "#dd1133",
+  });
+
+  const { PDFArray, PDFRawStream, decodePDFRawStream } = await import("pdf-lib");
+  const page = outDoc.getPages()[0];
+  const context = outDoc.context;
+  const contentsRef = page.node.get(PDFName.of("Contents"));
+  const contents = context.lookup(contentsRef);
+  const refs = contents instanceof PDFArray ? contents.asArray() : [contentsRef];
+  const tokens = [];
+  for (const ref of refs) {
+    const stream = context.lookupMaybe(ref, PDFRawStream);
+    if (!stream) continue;
+    tokens.push(...tokenizeContentStream(decodePDFRawStream(stream).decode()));
+  }
+
+  let curvedRedFills = 0;
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] !== "f" && tokens[i] !== "f*") {
+      continue;
+    }
+    const window = tokens.slice(Math.max(0, i - 5), i).join(" ");
+    if (!window.includes(TARGET_RGB)) {
+      continue;
+    }
+    let hasCurve = false;
+    for (let j = i - 1; j >= Math.max(0, i - 40); j -= 1) {
+      if (tokens[j] === "c" || tokens[j] === "v" || tokens[j] === "y") {
+        hasCurve = true;
+        break;
+      }
+      if (tokens[j] === "m") {
+        break;
+      }
+    }
+    if (hasCurve) {
+      curvedRedFills += 1;
+    }
+  }
+
+  if (curvedRedFills > 0) {
+    throw new Error(`Lecture PDF page 1 still has ${curvedRedFills} recolored curved white fill(s)`);
+  }
+
+  console.log("OK: lecture PDF speech-bubble curved fills stay white on vector export");
+}
+
 async function testFormInheritedWhiteTextRecolor() {
   const formBytes = new TextEncoder().encode("BT /F1 12 Tf 10 20 Td (Hidden) Tj ET\n");
   const pageBytes = new TextEncoder().encode("1 1 1 rg /Fm0 Do\n");
@@ -1042,6 +1152,7 @@ async function main() {
   await testWhiteOutlineFillRecolor();
   await testCurvedOutlineFillWithStaleFillColor();
   await testSpeechBubbleCoverPreserved();
+  await testMultiSubpathSpeechBubblePreserved();
   await testPathBackgroundPreserved();
   await testWhiteTextVisibleBeforeTj();
   await testBracketStrokeRecolor();
@@ -1130,6 +1241,7 @@ async function main() {
   }
 
   await testLecturePdfImagePreserved();
+  await testLecturePdfSpeechBubblesPreserved();
   await testImageRecolorSkippedWithRecolorText();
 
   console.log("\nAll tests passed.");
